@@ -19,7 +19,8 @@ except ImportError:
     MIDI_AVAILABLE = False
 from web.auth import (
     create_user, verify_user, log_visit, get_stats,
-    is_admin, get_all_users, get_visit_logs, get_user_visit_counts
+    is_admin, get_all_users, get_visit_logs, get_user_visit_counts,
+    promote_to_admin
 )
 
 # =========================
@@ -47,6 +48,15 @@ st.set_page_config(
 # 环境变量
 # =========================
 load_dotenv()
+
+# Streamlit Cloud 密钥注入环境变量
+try:
+    for _k, _v in st.secrets.items():
+        if _k not in os.environ:
+            os.environ[_k] = str(_v)
+except Exception:
+    pass
+
 api_key = os.getenv("DEEPSEEK_API_KEY")
 
 # =========================
@@ -210,6 +220,9 @@ if not st.session_state.logged_in:
                     st.error("Please fill in all fields.")
                 elif st.session_state.auth_mode == "login":
                     if verify_user(username, password):
+                        admin_name = os.getenv("ADMIN_USERNAME", "")
+                        if admin_name and username == admin_name:
+                            promote_to_admin(username)
                         st.session_state.logged_in = True
                         st.session_state.username = username
                         st.rerun()
