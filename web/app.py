@@ -25,7 +25,7 @@ from web.auth import (
 )
 from web.social import (
     send_friend_request, get_pending_requests, get_sent_requests,
-    accept_friend_request, reject_friend_request, get_friends,
+    accept_friend_request, reject_friend_request, get_friends, are_friends,
     send_private_message, get_private_messages,
     create_group, join_group, get_my_groups, get_group_info,
     get_group_members, search_groups_by_name,
