@@ -1,0 +1,13 @@
+**pycache**/
+*.pyc
+.env
+models/
+venv/
+.idea/
+.vscode/
+.DS_Store
+data/
+database/users.db
+ngrok.zip
+ngrok.exe
+.claude/
