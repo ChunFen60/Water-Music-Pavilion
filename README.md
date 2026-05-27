@@ -1,4 +1,4 @@
-# 🎹 Classical Piano Intelligence Analysis System
+# 🎹 Water Music Pavilion
 
 An AI-powered classical piano music analysis platform based on MIDI data, music feature extraction, and intelligent visualization.
 

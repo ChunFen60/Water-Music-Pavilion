@@ -12,7 +12,11 @@ BASE_DIR = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
 )
 sys.path.append(BASE_DIR)
-from modules.midi_analyzer import analyze_midi
+try:
+    from modules.midi_analyzer import analyze_midi
+    MIDI_AVAILABLE = True
+except ImportError:
+    MIDI_AVAILABLE = False
 from web.auth import (
     create_user, verify_user, log_visit, get_stats,
     is_admin, get_all_users, get_visit_logs, get_user_visit_counts
@@ -34,7 +38,7 @@ if "visit_logged" not in st.session_state:
 # 页面配置
 # =========================
 st.set_page_config(
-    page_title="Classical Piano Intelligence Analysis System",
+    page_title="Water Music Pavilion",
     page_icon="🎹",
     layout="wide"
 )
@@ -174,8 +178,8 @@ if not st.session_state.logged_in:
     </style>
 
     <div class="project-banner">
-        <h1>Classical Piano Intelligence<br>Analysis System</h1>
-        <p>AI-POWERED CLASSICAL MUSIC ANALYTICS</p>
+        <h1>Water Music<br>Pavilion</h1>
+        <p>EXPLORE THE ART OF PIANO MUSIC</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -242,7 +246,7 @@ if not st.session_state.logged_in:
 # =========================
 # 页面标题
 # =========================
-st.title("🎹 Classical Piano Intelligence Analysis System")
+st.title("🎹 Water Music Pavilion")
 
 # =========================
 # Sidebar Navigation
@@ -577,118 +581,114 @@ elif nav_option == "🎵 MIDI Analysis":
 
     st.header("🎵 MIDI Upload & Analysis")
 
-    uploaded_file = st.file_uploader(
-        "Upload MIDI File",
-        type=["mid", "midi"]
-    )
+    if not MIDI_AVAILABLE:
+        st.warning("⚠ MIDI analysis is not available in the cloud deployment. Please run the app locally for MIDI features.")
+    else:
+        uploaded_file = st.file_uploader(
+            "Upload MIDI File",
+            type=["mid", "midi"]
+        )
 
-    if uploaded_file is not None:
+        if uploaded_file is not None:
 
-        try:
+            try:
 
-            with tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=".mid"
-            ) as tmp_file:
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=".mid"
+                ) as tmp_file:
 
-                tmp_file.write(uploaded_file.read())
-                temp_path = tmp_file.name
+                    tmp_file.write(uploaded_file.read())
+                    temp_path = tmp_file.name
 
-            result = analyze_midi(temp_path)
+                result = analyze_midi(temp_path)
 
-            if "error" in result:
-                st.error(result["error"])
+                if "error" in result:
+                    st.error(result["error"])
 
-            else:
+                else:
 
-                st.success("✅ MIDI Analysis Complete")
+                    st.success("✅ MIDI Analysis Complete")
 
-                # -- Metrics --
-                col1, col2, col3, col4 = st.columns(4)
+                    col1, col2, col3, col4 = st.columns(4)
 
-                col1.metric("Average Pitch", result["avg_pitch"])
-                col2.metric("Average Duration", result["avg_duration"])
-                col3.metric("Average Velocity", result["avg_velocity"])
-                col4.metric("Total Notes", result["total_notes"])
+                    col1.metric("Average Pitch", result["avg_pitch"])
+                    col2.metric("Average Duration", result["avg_duration"])
+                    col3.metric("Average Velocity", result["avg_velocity"])
+                    col4.metric("Total Notes", result["total_notes"])
 
-                # -- Emotion --
-                st.subheader("🎭 Emotion Prediction")
-                st.info(result["emotion"])
+                    st.subheader("🎭 Emotion Prediction")
+                    st.info(result["emotion"])
 
-                # -- Piano Roll --
-                st.subheader("🎹 Piano Roll Visualization")
+                    st.subheader("🎹 Piano Roll Visualization")
 
-                notes_df_piano = pd.DataFrame(result["notes_data"])
+                    notes_df_piano = pd.DataFrame(result["notes_data"])
 
-                fig_roll = px.scatter(
-                    notes_df_piano,
-                    x="start",
-                    y="pitch",
-                    size="duration",
-                    color="velocity",
-                    title="Interactive Piano Roll",
-                    hover_data=[
-                        "start", "end", "duration",
-                        "pitch", "velocity"
-                    ]
-                )
-                fig_roll.update_layout(height=600)
-                st.plotly_chart(fig_roll, use_container_width=True)
+                    fig_roll = px.scatter(
+                        notes_df_piano,
+                        x="start",
+                        y="pitch",
+                        size="duration",
+                        color="velocity",
+                        title="Interactive Piano Roll",
+                        hover_data=[
+                            "start", "end", "duration",
+                            "pitch", "velocity"
+                        ]
+                    )
+                    fig_roll.update_layout(height=600)
+                    st.plotly_chart(fig_roll, use_container_width=True)
 
-                # -- Composer Similarity --
-                st.subheader("🎼 Composer Similarity Analysis")
+                    st.subheader("🎼 Composer Similarity Analysis")
 
-                similarity_results = []
-                composer_names = (
-                    df[composer_col]
-                    .dropna()
-                    .astype(str)
-                    .unique()
-                )
+                    similarity_results = []
+                    composer_names = (
+                        df[composer_col]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                    )
 
-                for composer in composer_names:
+                    for composer in composer_names:
 
-                    comp_df = df[
-                        df[composer_col].astype(str)
-                        == composer
-                    ]
+                        comp_df = df[
+                            df[composer_col].astype(str)
+                            == composer
+                        ]
 
-                    if pitch_col is None or duration_col is None:
-                        continue
+                        if pitch_col is None or duration_col is None:
+                            continue
 
-                    comp_pitch = comp_df[pitch_col].mean()
-                    comp_duration = comp_df[duration_col].mean()
+                        comp_pitch = comp_df[pitch_col].mean()
+                        comp_duration = comp_df[duration_col].mean()
 
-                    distance = (
-                        (result["avg_pitch"] - comp_pitch) ** 2
-                        + (result["avg_duration"] - comp_duration) ** 2
-                    ) ** 0.5
+                        distance = (
+                            (result["avg_pitch"] - comp_pitch) ** 2
+                            + (result["avg_duration"] - comp_duration) ** 2
+                        ) ** 0.5
 
-                    similarity_results.append({
-                        "composer": composer,
-                        "distance": round(distance, 2)
-                    })
+                        similarity_results.append({
+                            "composer": composer,
+                            "distance": round(distance, 2)
+                        })
 
-                similarity_df = pd.DataFrame(
-                    similarity_results
+                    similarity_df = pd.DataFrame(
+                        similarity_results
+                    ).sort_values("distance")
 
-                    
-                ).sort_values("distance")
+                    top_matches = similarity_df.head(5)
 
-                top_matches = similarity_df.head(5)
+                    st.dataframe(top_matches)
 
-                st.dataframe(top_matches)
+                    best_match = top_matches.iloc[0]
+                    st.success(
+                        f"Most Similar Composer Style: "
+                        f"{best_match['composer']}"
+                    )
 
-                best_match = top_matches.iloc[0]
-                st.success(
-                    f"Most Similar Composer Style: "
-                    f"{best_match['composer']}"
-                )
+                    if client:
 
-                # -- AI Auto Analysis --
-                if client:
-
-                    prompt = f"""
+                        prompt = f"""
 Analyze this piano music.
 
 Features:
@@ -705,34 +705,34 @@ Please describe:
 4. Performance feeling
 """
 
-                    with st.spinner("AI Analyzing Music..."):
+                        with st.spinner("AI Analyzing Music..."):
 
-                        response = client.chat.completions.create(
-                            model="deepseek-chat",
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "You are a professional "
-                                        "classical music analyst."
-                                    )
-                                },
-                                {"role": "user", "content": prompt}
-                            ]
-                        )
+                            response = client.chat.completions.create(
+                                model="deepseek-chat",
+                                messages=[
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "You are a professional "
+                                            "classical music analyst."
+                                        )
+                                    },
+                                    {"role": "user", "content": prompt}
+                                ]
+                            )
 
-                        answer = (
-                            response
-                            .choices[0]
-                            .message
-                            .content
-                        )
+                            answer = (
+                                response
+                                .choices[0]
+                                .message
+                                .content
+                            )
 
-                        st.subheader("🤖 AI Music Interpretation")
-                        st.success(answer)
+                            st.subheader("🤖 AI Music Interpretation")
+                            st.success(answer)
 
-        except Exception as e:
-            st.error(f"MIDI Analysis Error: {e}")
+            except Exception as e:
+                st.error(f"MIDI Analysis Error: {e}")
 
 # =========================
 # Section: Emotion Analysis
@@ -1080,4 +1080,4 @@ if st.sidebar.button("🚪 Logout", use_container_width=True):
     st.session_state.visit_logged = False
     st.session_state.auth_mode = "login"
     st.rerun()
-st.sidebar.caption("Classical Piano Intelligence Analysis System v1.0")
+st.sidebar.caption("Water Music Pavilion v1.0")

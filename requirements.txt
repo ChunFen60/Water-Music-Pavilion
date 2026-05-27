@@ -1,7 +1,6 @@
-streamlit>=1.30
-pandas>=2.0
-plotly>=5.15
-python-dotenv>=1.0
-openai>=1.0
-pretty_midi>=0.2
-numpy>=1.24
+streamlit
+pandas
+plotly
+python-dotenv
+openai
+numpy
