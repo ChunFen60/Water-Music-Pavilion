@@ -53,6 +53,11 @@ if "groups_tab" not in st.session_state:
     st.session_state.groups_tab = "my_groups"  # my_groups | create | join
 if "active_group" not in st.session_state:
     st.session_state.active_group = None
+# --- search session state ---
+if "search_result" not in st.session_state:
+    st.session_state.search_result = None
+if "search_query" not in st.session_state:
+    st.session_state.search_query = ""
 
 # =========================
 # 页面配置
@@ -1042,30 +1047,54 @@ elif nav_option == "💬 Friends & Chat":
     # ======== Search Users ========
     if st.session_state.friends_tab == "search":
         st.subheader("🔍 Find Users")
+
+        # init session state for search persistence
+        if "search_result" not in st.session_state:
+            st.session_state.search_result = None  # None | 'self' | 'found' | 'not_found'
+        if "search_query" not in st.session_state:
+            st.session_state.search_query = ""
+
         search_name = st.text_input("Enter username to search", placeholder="Type a username...")
         col1, col2 = st.columns([1, 3])
         with col1:
-            search_btn = st.button("Search", type="primary", use_container_width=True)
-
-        if search_btn and search_name.strip():
-            if search_name.strip() == username:
-                st.warning("That's you!")
-            else:
-                from web.auth import user_exists
-                if user_exists(search_name.strip()):
-                    found_user = search_name.strip()
-                    st.success(f"User **{found_user}** found!")
-                    if are_friends(username, found_user):
-                        st.info(f"You are already friends with {found_user}.")
+            if st.button("Search", type="primary", use_container_width=True):
+                query = search_name.strip()
+                if query:
+                    st.session_state.search_query = query
+                    if query == username:
+                        st.session_state.search_result = "self"
                     else:
-                        if st.button(f"➕ Send Friend Request to {found_user}", type="primary"):
-                            ok, msg = send_friend_request(username, found_user)
-                            if ok:
-                                st.success(msg)
-                            else:
-                                st.warning(msg)
+                        from web.auth import user_exists
+                        if user_exists(query):
+                            st.session_state.search_result = "found"
+                        else:
+                            st.session_state.search_result = "not_found"
                 else:
-                    st.error(f"User '{search_name.strip()}' not found.")
+                    st.session_state.search_query = ""
+                    st.session_state.search_result = None
+
+        # display saved search result (persists across reruns)
+        sq = st.session_state.search_query
+        sr = st.session_state.search_result
+        if sq and sr:
+            if sr == "self":
+                st.warning("That's you!")
+            elif sr == "found":
+                if are_friends(username, sq):
+                    st.info(f"You are already friends with **{sq}**.")
+                else:
+                    st.success(f"User **{sq}** found!")
+                    if st.button(f"➕ Send Friend Request to {sq}", type="primary", key="send_req_btn"):
+                        ok, msg = send_friend_request(username, sq)
+                        if ok:
+                            st.session_state.search_result = "sent"
+                            st.success(msg)
+                        else:
+                            st.warning(msg)
+            elif sr == "sent":
+                st.success(f"Friend request sent to **{sq}**! ✅")
+            elif sr == "not_found":
+                st.error(f"User '{sq}' not found.")
 
         # show sent requests
         st.markdown("---")
