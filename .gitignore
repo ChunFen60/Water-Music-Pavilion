@@ -8,6 +8,8 @@ venv/
 .DS_Store
 data/
 database/users.db
+database/social.db
+shared_files/
 ngrok.zip
 ngrok.exe
 .claude/

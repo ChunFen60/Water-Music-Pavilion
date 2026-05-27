@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import tempfile
 
 import pandas as pd
@@ -22,6 +23,15 @@ from web.auth import (
     is_admin, get_all_users, get_visit_logs, get_user_visit_counts,
     promote_to_admin
 )
+from web.social import (
+    send_friend_request, get_pending_requests, get_sent_requests,
+    accept_friend_request, reject_friend_request, get_friends,
+    send_private_message, get_private_messages,
+    create_group, join_group, get_my_groups, get_group_info,
+    get_group_members, search_groups_by_name,
+    send_group_message, get_group_messages,
+    upload_file, get_shared_files, get_file
+)
 
 # =========================
 # Session State Init
@@ -34,6 +44,15 @@ if "auth_mode" not in st.session_state:
     st.session_state.auth_mode = "login"
 if "visit_logged" not in st.session_state:
     st.session_state.visit_logged = False
+# --- social session state ---
+if "friends_tab" not in st.session_state:
+    st.session_state.friends_tab = "friends"  # search | requests | friends
+if "active_chat" not in st.session_state:
+    st.session_state.active_chat = None
+if "groups_tab" not in st.session_state:
+    st.session_state.groups_tab = "my_groups"  # my_groups | create | join
+if "active_group" not in st.session_state:
+    st.session_state.active_group = None
 
 # =========================
 # 页面配置
@@ -316,6 +335,9 @@ nav_items = [
     "🎭 Emotion Analysis",
     "🤖 AI Music Assistant"
 ]
+
+nav_items.append("💬 Friends & Chat")
+nav_items.append("👥 Groups")
 
 if is_admin(st.session_state.username):
     nav_items.append("🔐 Admin Panel")
@@ -991,6 +1013,402 @@ elif nav_option == "🤖 AI Music Assistant":
 
     else:
         st.warning("⚠ DeepSeek API Key not detected. Please set DEEPSEEK_API_KEY in .env file.")
+
+# =========================
+# Section: Friends & Chat
+# =========================
+elif nav_option == "💬 Friends & Chat":
+
+    st.header("💬 Friends & Chat")
+
+    username = st.session_state.username
+
+    # -- sub-tabs --
+    tab_names = ["👥 My Friends", "🔍 Search Users", "📩 Requests"]
+    tab_keys = ["friends", "search", "requests"]
+    current_idx = tab_keys.index(st.session_state.friends_tab) if st.session_state.friends_tab in tab_keys else 0
+
+    cols = st.columns(len(tab_names))
+    for i, (name, key) in enumerate(zip(tab_names, tab_keys)):
+        with cols[i]:
+            btn_type = "primary" if key == st.session_state.friends_tab else "secondary"
+            if st.button(name, key=f"ftab_{key}", use_container_width=True, type=btn_type):
+                st.session_state.friends_tab = key
+                st.session_state.active_chat = None
+                st.rerun()
+
+    st.markdown("---")
+
+    # ======== Search Users ========
+    if st.session_state.friends_tab == "search":
+        st.subheader("🔍 Find Users")
+        search_name = st.text_input("Enter username to search", placeholder="Type a username...")
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            search_btn = st.button("Search", type="primary", use_container_width=True)
+
+        if search_btn and search_name.strip():
+            if search_name.strip() == username:
+                st.warning("That's you!")
+            else:
+                from web.auth import user_exists
+                if user_exists(search_name.strip()):
+                    found_user = search_name.strip()
+                    st.success(f"User **{found_user}** found!")
+                    if are_friends(username, found_user):
+                        st.info(f"You are already friends with {found_user}.")
+                    else:
+                        if st.button(f"➕ Send Friend Request to {found_user}", type="primary"):
+                            ok, msg = send_friend_request(username, found_user)
+                            if ok:
+                                st.success(msg)
+                            else:
+                                st.warning(msg)
+                else:
+                    st.error(f"User '{search_name.strip()}' not found.")
+
+        # show sent requests
+        st.markdown("---")
+        st.caption("📤 Sent Requests")
+        sent = get_sent_requests(username)
+        if sent:
+            for rid, to_user, status, created in sent:
+                status_icon = {"pending": "⏳", "accepted": "✅", "rejected": "❌"}.get(status, "")
+                st.write(f"{status_icon} To: **{to_user}** — {status} ({created})")
+        else:
+            st.caption("No sent requests.")
+
+    # ======== Requests ========
+    elif st.session_state.friends_tab == "requests":
+        st.subheader("📩 Friend Requests")
+        pending = get_pending_requests(username)
+        if pending:
+            for rid, from_user, created in pending:
+                col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+                with col1:
+                    st.write(f"👤 **{from_user}**")
+                    st.caption(f"Sent: {created}")
+                with col2:
+                    if st.button("✅ Accept", key=f"acc_{rid}", type="primary", use_container_width=True):
+                        ok, msg = accept_friend_request(rid, username)
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                with col3:
+                    if st.button("❌ Reject", key=f"rej_{rid}", use_container_width=True):
+                        ok, msg = reject_friend_request(rid, username)
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                st.markdown("---")
+        else:
+            st.info("No pending friend requests.")
+
+    # ======== My Friends ========
+    else:
+        friends = get_friends(username)
+
+        if st.session_state.active_chat and st.session_state.active_chat in friends:
+            # --- Chat Window ---
+            chat_with = st.session_state.active_chat
+
+            col_back, col_title = st.columns([1, 5])
+            with col_back:
+                if st.button("← Back", key="back_friends", use_container_width=True):
+                    st.session_state.active_chat = None
+                    st.rerun()
+            with col_title:
+                st.subheader(f"💬 Chat with {chat_with}")
+
+            st.markdown("---")
+
+            # Message display area
+            msgs = get_private_messages(username, chat_with, limit=50)
+            chat_html = '<div style="max-height:400px;overflow-y:auto;padding:8px;">'
+            if msgs:
+                for sender, content, sent_at in msgs:
+                    if sender == username:
+                        chat_html += (
+                            f'<div style="text-align:right;margin:6px 0;">'
+                            f'<span style="background:#4F6FDE;color:#fff;padding:8px 14px;'
+                            f'border-radius:14px 14px 0 14px;display:inline-block;max-width:75%;'
+                            f'text-align:left;word-wrap:break-word;">{content}</span>'
+                            f'<div style="font-size:11px;color:#888;margin-top:2px;">{sent_at}</div>'
+                            f'</div>'
+                        )
+                    else:
+                        chat_html += (
+                            f'<div style="text-align:left;margin:6px 0;">'
+                            f'<span style="background:#333;color:#ddd;padding:8px 14px;'
+                            f'border-radius:14px 14px 14px 0;display:inline-block;max-width:75%;'
+                            f'text-align:left;word-wrap:break-word;">'
+                            f'<strong>{sender}</strong><br>{content}</span>'
+                            f'<div style="font-size:11px;color:#888;margin-top:2px;">{sent_at}</div>'
+                            f'</div>'
+                        )
+            else:
+                chat_html += '<div style="text-align:center;color:#888;padding:40px;">No messages yet. Say hello!</div>'
+            chat_html += '</div>'
+            st.markdown(chat_html, unsafe_allow_html=True)
+
+            # Send message
+            with st.form("pm_form", clear_on_submit=True):
+                col_input, col_send = st.columns([4, 1])
+                with col_input:
+                    msg_text = st.text_input("Message", placeholder="Type a message...", label_visibility="collapsed")
+                with col_send:
+                    send_btn = st.form_submit_button("Send ▶", type="primary", use_container_width=True)
+                if send_btn and msg_text.strip():
+                    send_private_message(username, chat_with, msg_text.strip())
+                    st.rerun()
+
+            time.sleep(3)
+            st.rerun()
+
+        else:
+            st.subheader("👥 My Friends")
+            if friends:
+                for f in friends:
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"🎹 **{f}**")
+                    with col2:
+                        if st.button("💬 Chat", key=f"chat_{f}", type="primary", use_container_width=True):
+                            st.session_state.active_chat = f
+                            st.rerun()
+                    st.markdown("---")
+            else:
+                st.info("No friends yet. Search for users to add friends!")
+
+# =========================
+# Section: Groups
+# =========================
+elif nav_option == "👥 Groups":
+
+    st.header("👥 Groups")
+
+    username = st.session_state.username
+
+    # -- sub-tabs --
+    tab_names = ["📋 My Groups", "➕ Create Group", "🔗 Join Group"]
+    tab_keys = ["my_groups", "create", "join"]
+    current_idx = tab_keys.index(st.session_state.groups_tab) if st.session_state.groups_tab in tab_keys else 0
+
+    cols = st.columns(len(tab_names))
+    for i, (name, key) in enumerate(zip(tab_names, tab_keys)):
+        with cols[i]:
+            btn_type = "primary" if key == st.session_state.groups_tab else "secondary"
+            if st.button(name, key=f"gtab_{key}", use_container_width=True, type=btn_type):
+                st.session_state.groups_tab = key
+                st.session_state.active_group = None
+                st.rerun()
+
+    st.markdown("---")
+
+    # ======== My Groups ========
+    if st.session_state.groups_tab == "my_groups":
+        my_groups = get_my_groups(username)
+
+        if st.session_state.active_group:
+            active_gc = st.session_state.active_group
+            if not is_group_member(active_gc, username):
+                st.warning("You are no longer a member of this group.")
+                st.session_state.active_group = None
+                st.rerun()
+
+            ginfo = get_group_info(active_gc)
+            if ginfo is None:
+                st.error("Group not found.")
+                st.session_state.active_group = None
+                st.rerun()
+
+            # --- Group Chat Window ---
+            col_back, col_title = st.columns([1, 5])
+            with col_back:
+                if st.button("← Back", key="back_groups", use_container_width=True):
+                    st.session_state.active_group = None
+                    st.rerun()
+            with col_title:
+                st.subheader(f"💬 {ginfo[1]}")
+                st.caption(f"Code: {ginfo[0]} | Created by: {ginfo[2]}")
+
+            # Members sidebar
+            members = get_group_members(active_gc)
+            with st.expander(f"👥 Members ({len(members)})"):
+                for m_name, m_joined in members:
+                    st.write(f"🎹 **{m_name}** — joined {m_joined}")
+
+            st.markdown("---")
+
+            # Group messages
+            gmsgs = get_group_messages(active_gc, limit=50)
+            chat_html = '<div style="max-height:350px;overflow-y:auto;padding:8px;">'
+            if gmsgs:
+                for sender, content, sent_at in gmsgs:
+                    if sender == username:
+                        chat_html += (
+                            f'<div style="text-align:right;margin:6px 0;">'
+                            f'<span style="background:#4F6FDE;color:#fff;padding:8px 14px;'
+                            f'border-radius:14px 14px 0 14px;display:inline-block;max-width:75%;'
+                            f'text-align:left;word-wrap:break-word;">{content}</span>'
+                            f'<div style="font-size:11px;color:#888;margin-top:2px;">{sent_at}</div>'
+                            f'</div>'
+                        )
+                    else:
+                        chat_html += (
+                            f'<div style="text-align:left;margin:6px 0;">'
+                            f'<span style="background:#333;color:#ddd;padding:8px 14px;'
+                            f'border-radius:14px 14px 14px 0;display:inline-block;max-width:75%;'
+                            f'text-align:left;word-wrap:break-word;">'
+                            f'<strong>{sender}</strong><br>{content}</span>'
+                            f'<div style="font-size:11px;color:#888;margin-top:2px;">{sent_at}</div>'
+                            f'</div>'
+                        )
+            else:
+                chat_html += '<div style="text-align:center;color:#888;padding:40px;">No messages yet.</div>'
+            chat_html += '</div>'
+            st.markdown(chat_html, unsafe_allow_html=True)
+
+            # Send group message
+            with st.form("gm_form", clear_on_submit=True):
+                col_input, col_send = st.columns([4, 1])
+                with col_input:
+                    gmsg_text = st.text_input("Message", placeholder="Type a message...", label_visibility="collapsed", key="gmsg_input")
+                with col_send:
+                    gsend_btn = st.form_submit_button("Send ▶", type="primary", use_container_width=True)
+                if gsend_btn and gmsg_text.strip():
+                    send_group_message(active_gc, username, gmsg_text.strip())
+                    st.rerun()
+
+            st.markdown("---")
+
+            # ---- File Sharing ----
+            st.subheader("📎 Shared Files")
+
+            uploaded_file = st.file_uploader(
+                "Upload a file to share (max 5MB, PDF/MIDI/images)",
+                type=["pdf", "mid", "midi", "png", "jpg", "jpeg", "txt", "musicxml", "xml"],
+                key="group_file_uploader"
+            )
+            if uploaded_file is not None:
+                file_bytes = uploaded_file.read()
+                file_type = uploaded_file.name.split(".")[-1] if "." in uploaded_file.name else "unknown"
+                ok, msg = upload_file(active_gc, username, uploaded_file.name, file_type, file_bytes)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+            shared = get_shared_files(active_gc)
+            if shared:
+                for fid, f_user, f_name, f_type, f_size, f_time in shared:
+                    size_kb = f_size / 1024
+                    col1, col2, col3 = st.columns([3, 1, 1])
+                    with col1:
+                        icon = {"pdf": "📄", "mid": "🎵", "midi": "🎵", "png": "🖼", "jpg": "🖼", "jpeg": "🖼", "txt": "📝", "musicxml": "🎼", "xml": "🎼"}.get(f_type, "📁")
+                        st.write(f"{icon} **{f_name}** ({size_kb:.1f} KB) — from {f_user}")
+                        st.caption(f_time)
+                    with col2:
+                        filedata = get_file(fid)
+                        if filedata:
+                            st.download_button(
+                                "⬇ Download",
+                                data=filedata[2],
+                                file_name=filedata[0],
+                                mime="application/octet-stream",
+                                key=f"dl_{fid}",
+                                use_container_width=True
+                            )
+                    st.markdown("---")
+            else:
+                st.caption("No shared files yet.")
+
+            time.sleep(3)
+            st.rerun()
+
+        else:
+            if my_groups:
+                for gcode, gname, creator, created in my_groups:
+                    col1, col2, col3 = st.columns([3, 2, 1])
+                    with col1:
+                        st.write(f"📋 **{gname}**")
+                        st.caption(f"Code: {gcode}")
+                    with col2:
+                        st.caption(f"Created by: {creator}")
+                    with col3:
+                        if st.button("Enter", key=f"enter_{gcode}", type="primary", use_container_width=True):
+                            st.session_state.active_group = gcode
+                            st.rerun()
+                    st.markdown("---")
+            else:
+                st.info("You haven't joined any groups yet. Create one or join with a code!")
+
+    # ======== Create Group ========
+    elif st.session_state.groups_tab == "create":
+        st.subheader("➕ Create a New Group")
+        group_name = st.text_input("Group Name", placeholder="Enter a group name...")
+        if st.button("Create Group", type="primary", use_container_width=True):
+            if not group_name.strip():
+                st.warning("Please enter a group name.")
+            else:
+                code, msg = create_group(group_name.strip(), username)
+                if code:
+                    st.success(msg)
+                    st.balloons()
+                    st.markdown(f"### Share this code with friends: **`{code}`**")
+                else:
+                    st.error(msg)
+
+    # ======== Join Group ========
+    else:
+        st.subheader("🔗 Join a Group")
+        search_method = st.radio("Find by:", ["Enter Group Code", "Search by Name"], horizontal=True)
+
+        if search_method == "Enter Group Code":
+            input_code = st.text_input("Group Code", placeholder="Enter 5-digit group code...", max_chars=5)
+            if st.button("Join Group", type="primary", use_container_width=True):
+                if not input_code.strip():
+                    st.warning("Please enter a group code.")
+                else:
+                    ok, msg = join_group(input_code.strip(), username)
+                    if ok:
+                        st.success(msg)
+                        st.session_state.groups_tab = "my_groups"
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        else:
+            search_keyword = st.text_input("Search by group name", placeholder="Type a keyword...")
+            if st.button("Search Groups", type="primary", use_container_width=True):
+                if search_keyword.strip():
+                    results = search_groups_by_name(search_keyword.strip())
+                    if results:
+                        for gcode, gname, creator in results:
+                            col1, col2, col3 = st.columns([3, 2, 1])
+                            with col1:
+                                st.write(f"📋 **{gname}**")
+                                st.caption(f"Code: {gcode}")
+                            with col2:
+                                st.caption(f"Creator: {creator}")
+                            with col3:
+                                if is_group_member(gcode, username):
+                                    st.success("Joined")
+                                else:
+                                    if st.button("Join", key=f"join_{gcode}", type="primary", use_container_width=True):
+                                        ok, msg = join_group(gcode, username)
+                                        if ok:
+                                            st.success(msg)
+                                            st.rerun()
+                                        else:
+                                            st.error(msg)
+                            st.markdown("---")
+                    else:
+                        st.info("No groups found matching your search.")
 
 # =========================
 # Section: Admin Panel
