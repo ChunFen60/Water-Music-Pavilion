@@ -842,9 +842,9 @@ elif nav_option == "🎵 MIDI Analysis":
                     col1, col2, col3 = st.columns(3)
                     col1.metric("🎹 Pitch Range", f"{result['pitch_range']} st",
                                 help="Keyboard range — wider = more dramatic")
-                    col2.metric("🎼 Polyphony", f"{result['avg_polyphony']:.1f} voices",
+                    col2.metric("🎼 Polyphony", f"{result.get('avg_polyphony', 0):.1f} voices",
                                 help="Average simultaneous notes — higher = denser counterpoint (Bach~3.5, Chopin~2.0)")
-                    col3.metric("🎨 Chromaticism", f"{result['pitch_entropy']:.3f}",
+                    col3.metric("🎨 Chromaticism", f"{result.get('pitch_entropy', 0):.3f}",
                                 help="Pitch-class entropy 0-1 — higher = more chromatic (Romantic), lower = diatonic (Baroque)")
 
                     col1, col2, col3 = st.columns(3)
@@ -982,9 +982,9 @@ Musical Profile:
 - Melodic Complexity: {result['melodic_complexity']:.1f} (average interval between notes)
 - Rhythm Variation: {result['rhythm_std']:.2f} (std of durations)
 - Dynamic Range: {int(dynamic_range)} (MIDI velocity)
-- Polyphony: {result['avg_polyphony']:.1f} avg simultaneous voices
+- Polyphony: {result.get('avg_polyphony', 0):.1f} avg simultaneous voices
   (Baroque counterpoint ~3.5, Romantic melody+accomp ~2.0, solo ~1.0)
-- Chromaticism: {result['pitch_entropy']:.3f} (0-1 scale)
+- Chromaticism: {result.get('pitch_entropy', 0):.3f} (0-1 scale)
   (diatonic ~0.70, moderately chromatic ~0.85, highly chromatic ~0.95)
 
 The 5 most stylistically similar pieces in our classical piano dataset:
