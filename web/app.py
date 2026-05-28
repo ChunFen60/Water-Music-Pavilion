@@ -3,6 +3,7 @@ import sys
 import time
 import tempfile
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -448,6 +449,104 @@ if nav_option == "📊 Dataset Overview":
     fig_rm.update_layout(height=480, showlegend=False)
     st.plotly_chart(fig_rm, use_container_width=True)
 
+    # -- Rhythm Style Quadrant --
+    st.subheader("🎵 Rhythm Style Quadrant: Density × Variation")
+
+    med_density = df["note_density"].median()
+    med_rhythm = df["rhythm_std"].median()
+
+    fig_quad = px.scatter(
+        df,
+        x="note_density",
+        y="rhythm_std",
+        color=composer_col,
+        size="tempo",
+        hover_name="title",
+        title="Rhythm Style Map — 4 Quadrants of Piano Writing",
+        labels={
+            "note_density": "Note Density (notes/sec)",
+            "rhythm_std": "Rhythm Variation (std)"
+        },
+        opacity=0.7
+    )
+    fig_quad.add_hline(y=med_rhythm, line_dash="dash", line_color="gray", opacity=0.4)
+    fig_quad.add_vline(x=med_density, line_dash="dash", line_color="gray", opacity=0.4)
+    fig_quad.add_annotation(x=df["note_density"].max() * 0.92, y=df["rhythm_std"].max() * 0.95,
+                             text="🏇 Virtuoso", showarrow=False, font=dict(color="#888", size=11))
+    fig_quad.add_annotation(x=df["note_density"].max() * 0.92, y=df["rhythm_std"].min() * 1.05,
+                             text="⚙️ Motor-like", showarrow=False, font=dict(color="#888", size=11))
+    fig_quad.add_annotation(x=df["note_density"].min() * 1.08, y=df["rhythm_std"].max() * 0.95,
+                             text="🎭 Free Rubato", showarrow=False, font=dict(color="#888", size=11))
+    fig_quad.add_annotation(x=df["note_density"].min() * 1.08, y=df["rhythm_std"].min() * 1.05,
+                             text="🌫 Minimalist", showarrow=False, font=dict(color="#888", size=11))
+    fig_quad.update_layout(height=520, showlegend=False)
+    st.plotly_chart(fig_quad, use_container_width=True)
+
+    # -- Composer Similarity Network --
+    st.subheader("🔗 Composer Similarity Network")
+
+    features_net = ["pitch_range", "note_density", "tempo", "rhythm_std",
+                    "melodic_complexity", "avg_velocity", "pitch_variance"]
+    composer_profiles = df.groupby(composer_col)[features_net].mean().dropna()
+    profiles_np = composer_profiles.values
+    means = profiles_np.mean(axis=0)
+    stds = profiles_np.std(axis=0)
+    stds[stds == 0] = 1
+    profiles_norm = (profiles_np - means) / stds
+
+    # cosine similarity
+    norms = np.linalg.norm(profiles_norm, axis=1)
+    sim_matrix = np.dot(profiles_norm, profiles_norm.T) / np.outer(norms, norms)
+
+    # PCA via SVD for 2D positions
+    centered = profiles_norm - profiles_norm.mean(axis=0)
+    U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+    pc_scores = centered @ Vt[:2].T
+
+    composer_names = composer_profiles.index.tolist()
+    n_comp = len(composer_names)
+
+    fig_net = go.Figure()
+
+    # edges: top 2 connections per composer
+    for i in range(n_comp):
+        sims = sim_matrix[i].copy()
+        sims[i] = -1
+        top_k = np.argsort(sims)[-2:]
+        for j in top_k:
+            if i < j and sims[j] > 0.3:
+                fig_net.add_trace(go.Scatter(
+                    x=[pc_scores[i, 0], pc_scores[j, 0]],
+                    y=[pc_scores[i, 1], pc_scores[j, 1]],
+                    mode="lines",
+                    line=dict(width=sims[j] * 1.8, color="rgba(150,150,150,0.3)"),
+                    hoverinfo="none",
+                    showlegend=False
+                ))
+
+    # nodes
+    fig_net.add_trace(go.Scatter(
+        x=pc_scores[:, 0],
+        y=pc_scores[:, 1],
+        mode="markers+text",
+        text=composer_names,
+        textposition="top center",
+        textfont=dict(size=9),
+        marker=dict(size=12, color=np.arange(n_comp), colorscale="Viridis",
+                    showscale=False, line=dict(width=1, color="white")),
+        hoverinfo="text",
+        showlegend=False
+    ))
+
+    fig_net.update_layout(
+        title="Composer Style Similarity Map (PCA projection — closer = more similar)",
+        height=620,
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
+        margin=dict(t=40, b=20, l=20, r=20)
+    )
+    st.plotly_chart(fig_net, use_container_width=True)
+
     # -- 数据表预览 --
     st.subheader("🧾 Full Dataset Preview")
     st.dataframe(df.head(50))
@@ -605,6 +704,44 @@ elif nav_option == "🎼 Composer Analysis":
     )
     fig_prof.update_layout(height=420)
     st.plotly_chart(fig_prof, use_container_width=True)
+
+    # -- 音域分布小提琴图（Top 20 作曲家）--
+    st.subheader("🎻 Pitch Range Distribution by Composer")
+
+    top_20 = df[composer_col].value_counts().head(20).index.tolist()
+    top_df = df[df[composer_col].isin(top_20)]
+
+    fig_violin = px.violin(
+        top_df,
+        x=composer_col,
+        y="pitch_range",
+        color=composer_col,
+        box=True,
+        points="outliers",
+        title="Tessitura Spread — Top 20 Composers (wider = broader keyboard range)",
+        labels={"pitch_range": "Pitch Range (semitones)"}
+    )
+    fig_violin.update_layout(height=420, showlegend=False, xaxis_tickangle=-45)
+    st.plotly_chart(fig_violin, use_container_width=True)
+
+    # -- 力度 × 音高密度热力图 --
+    st.subheader("🎼 Velocity × Pitch Density Landscape")
+
+    fig_vp = px.density_heatmap(
+        df,
+        x="avg_velocity",
+        y="avg_pitch",
+        marginal_x="histogram",
+        marginal_y="histogram",
+        title="Touch & Range Map — Where do composers place their notes?",
+        labels={
+            "avg_velocity": "Average Velocity (MIDI 0-127)",
+            "avg_pitch": "Average Pitch (MIDI note)"
+        },
+        color_continuous_scale="Blues"
+    )
+    fig_vp.update_layout(height=460)
+    st.plotly_chart(fig_vp, use_container_width=True)
 
     # -- 作品列表 --
     st.subheader("🧾 Works by " + selected_composer)
