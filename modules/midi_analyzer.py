@@ -83,7 +83,9 @@ def analyze_midi(midi_file_path):
     pitch_diff = np.diff(pitches)
     melodic_complexity = float(np.mean(np.abs(pitch_diff))) if len(pitch_diff) > 0 else 0.0
 
-    emotion = _detect_emotion(avg_pitch, avg_duration, avg_velocity, note_density, pitch_variance, tempo)
+    avg_polyphony = _compute_polyphony(notes_data)
+    pitch_entropy = _compute_pitch_entropy(notes_data)
+
     key_result = detect_key(midi_file_path)
 
     def r(v):
@@ -101,6 +103,8 @@ def analyze_midi(midi_file_path):
         "rhythm_std": r(rhythm_std),
         "melodic_complexity": r(melodic_complexity),
         "total_notes": total_notes,
+        "avg_polyphony": r(avg_polyphony),
+        "pitch_entropy": r(pitch_entropy),
     }
 
     return {
@@ -115,22 +119,47 @@ def analyze_midi(midi_file_path):
         "tempo": r(tempo),
         "rhythm_std": r(rhythm_std),
         "melodic_complexity": r(melodic_complexity),
-        "emotion": emotion,
         "notes_data": notes_data,
         "feature_vector": feature_vector,
         "key": key_result["key"],
         "key_confidence": key_result["confidence"],
+        "avg_polyphony": r(avg_polyphony),
+        "pitch_entropy": r(pitch_entropy),
     }
 
 
-def _detect_emotion(pitch, duration, velocity, density, pitch_variance, tempo):
-    if velocity > 80 and density > 10 and tempo > 140:
-        return "Energetic"
-    elif duration > 0.7 and pitch < 62 and tempo < 100:
-        return "Sad"
-    elif pitch < 58 and pitch_variance < 45:
-        return "Dark"
-    elif pitch > 67 and velocity > 65 and tempo > 110:
-        return "Happy"
-    else:
-        return "Calm"
+def _compute_polyphony(notes_data):
+    """Average number of simultaneously sounding notes over time."""
+    if not notes_data:
+        return 0
+    events = []
+    for n in notes_data:
+        events.append((n["start"], 1))
+        events.append((n["end"], -1))
+    events.sort(key=lambda x: x[0])
+    current = 0
+    weighted = 0.0
+    prev_t = events[0][0]
+    for t, delta in events:
+        weighted += current * (t - prev_t)
+        prev_t = t
+        current += delta
+    total_t = events[-1][0] - events[0][0]
+    return weighted / total_t if total_t > 0 else 0
+
+
+def _compute_pitch_entropy(notes_data):
+    """Normalized entropy of pitch-class distribution (0-1).
+    Higher = more chromatic (Romantic). Lower = more diatonic (Baroque)."""
+    if not notes_data:
+        return 0
+    histogram = np.zeros(12)
+    total_w = 0.0
+    for n in notes_data:
+        w = n["duration"] * (n["velocity"] / 127)
+        histogram[n["pitch"] % 12] += w
+        total_w += w
+    if total_w > 0:
+        histogram /= total_w
+    entropy = -np.sum(histogram * np.log(histogram + 1e-12))
+    return entropy / np.log(12)

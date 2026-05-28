@@ -427,6 +427,7 @@ if nav_option == "📊 Dataset Overview":
             "note_density": "Note Density (notes/sec)"
         },
         opacity=0.75
+        
     )
     fig_style.update_layout(height=520, showlegend=False)
     st.plotly_chart(fig_style, use_container_width=True)
@@ -791,44 +792,42 @@ elif nav_option == "🎵 MIDI Analysis":
                     # ---- Build feature vector from uploaded MIDI ----
                     notes_arr = pd.DataFrame(result["notes_data"])
                     velocities = notes_arr["velocity"].values
-                    pitches = notes_arr["pitch"].values
-                    durations = notes_arr["duration"].values
-
                     dynamic_range = velocities.max() - velocities.min()
 
-                    fv_upload = {
-                        "pitch_range": result["pitch_range"],
-                        "note_density": result["note_density"],
-                        "tempo": result["tempo"],
-                        "rhythm_std": result["rhythm_std"],
-                        "melodic_complexity": result["melodic_complexity"],
-                        "avg_velocity": result["avg_velocity"],
-                        "pitch_variance": result["pitch_variance"],
-                        "velocity_variance": result["velocity_variance"],
-                    }
+                    # weighted features (F-ratio from dataset as weight)
+                    # excludes tempo & avg_velocity (F<7, noisy/performance-dependent)
+                    features_sim = [
+                        "pitch_range", "pitch_variance", "velocity_variance",
+                        "melodic_complexity", "note_density", "rhythm_std",
+                    ]
+                    feature_weights = np.array([62.2, 32.3, 18.5, 14.4, 7.0, 2.5])
+                    feature_weights = feature_weights / feature_weights.sum()
 
-                    # build dataset profiles (same features as network graph)
-                    features_sim = list(fv_upload.keys())
+                    fv_upload = {k: result[k] for k in features_sim}
+
                     ds_mean = df[features_sim].mean()
                     ds_std = df[features_sim].std()
                     ds_std[ds_std == 0] = 1
 
-                    uploaded_norm = np.array([fv_upload[k] for k in features_sim])
-                    uploaded_norm = (uploaded_norm - ds_mean.values) / ds_std.values
+                    uploaded_norm = (np.array([fv_upload[k] for k in features_sim]) - ds_mean.values) / ds_std.values
 
-                    # ---- Piece-level k-NN matching ----
+                    # ---- Piece-level weighted k-NN ----
                     ds_norm = (df[features_sim] - ds_mean) / ds_std
-                    ds_cos = np.dot(ds_norm.values, uploaded_norm) / (
-                        np.linalg.norm(ds_norm.values, axis=1) * np.linalg.norm(uploaded_norm) + 1e-10
+                    w = feature_weights
+                    ds_weighted = ds_norm.values * np.sqrt(w)
+                    up_weighted = uploaded_norm * np.sqrt(w)
+                    ds_cos = np.dot(ds_weighted, up_weighted) / (
+                        np.linalg.norm(ds_weighted, axis=1) * np.linalg.norm(up_weighted) + 1e-10
                     )
                     top5_idx = np.argsort(ds_cos)[-5:][::-1]
                     top5_pieces = df.iloc[top5_idx]
 
-                    # ---- Composer-level similarity ----
+                    # ---- Composer-level weighted similarity ----
                     composer_profiles = df.groupby(composer_col)[features_sim].mean()
                     cp_norm = (composer_profiles - ds_mean) / ds_std
-                    cp_cos = np.dot(cp_norm.values, uploaded_norm) / (
-                        np.linalg.norm(cp_norm.values, axis=1) * np.linalg.norm(uploaded_norm) + 1e-10
+                    cp_weighted = cp_norm.values * np.sqrt(w)
+                    cp_cos = np.dot(cp_weighted, up_weighted) / (
+                        np.linalg.norm(cp_weighted, axis=1) * np.linalg.norm(up_weighted) + 1e-10
                     )
                     top_comp_idx = np.argsort(cp_cos)[-5:][::-1]
                     top_composers = [
@@ -842,35 +841,36 @@ elif nav_option == "🎵 MIDI Analysis":
 
                     col1, col2, col3 = st.columns(3)
                     col1.metric("🎹 Pitch Range", f"{result['pitch_range']} st",
-                                help="Width of the keyboard range used — wider = more dramatic contrasts")
-                    col2.metric("📊 Note Density", f"{result['note_density']:.1f} n/s",
-                                help="Notes per second — higher = busier texture")
-                    col3.metric("⏱ Tempo", f"{result['tempo']:.0f} BPM",
-                                help="Estimated tempo")
+                                help="Keyboard range — wider = more dramatic")
+                    col2.metric("🎼 Polyphony", f"{result['avg_polyphony']:.1f} voices",
+                                help="Average simultaneous notes — higher = denser counterpoint (Bach~3.5, Chopin~2.0)")
+                    col3.metric("🎨 Chromaticism", f"{result['pitch_entropy']:.3f}",
+                                help="Pitch-class entropy 0-1 — higher = more chromatic (Romantic), lower = diatonic (Baroque)")
 
                     col1, col2, col3 = st.columns(3)
-                    col1.metric("🎵 Melodic Complexity", f"{result['melodic_complexity']:.1f}",
+                    col1.metric("📊 Note Density", f"{result['note_density']:.1f} n/s",
+                                help="Notes per second — higher = busier texture")
+                    col2.metric("🎵 Melodic Complexity", f"{result['melodic_complexity']:.1f}",
                                 help="Average pitch interval between consecutive notes")
-                    col2.metric("🎶 Rhythm Variation", f"{result['rhythm_std']:.2f}",
-                                help="Standard deviation of note durations — higher = more rhythmic variety")
-                    col3.metric("🔑 Key", f"{result['key']} ({result['key_confidence']}%)",
-                                help="Detected musical key")
+                    col3.metric("🎶 Rhythm Variation", f"{result['rhythm_std']:.2f}",
+                                help="Std of note durations — higher = more rhythmic variety")
 
                     col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("💥 Dynamic Range", f"{int(dynamic_range)}",
+                    col1.metric("🔑 Key", f"{result['key']} ({result['key_confidence']}%)",
+                                help="Detected musical key")
+                    col2.metric("⏱ Tempo", f"{result['tempo']:.0f} BPM")
+                    col3.metric("💥 Dynamic Range", f"{int(dynamic_range)}",
                                 help="Velocity range (MIDI 0-127)")
-                    col2.metric("📝 Total Notes", result["total_notes"])
-                    col3.metric("📈 Pitch Variance", f"{result['pitch_variance']:.0f}")
-                    col4.metric("📉 Velocity Var.", f"{result['velocity_variance']:.0f}")
+                    col4.metric("📝 Total Notes", result["total_notes"])
 
                     # ---- Feature radar vs dataset average ----
                     st.markdown("---")
                     st.subheader("🎯 Style Radar: Your MIDI vs Dataset Average")
 
                     radar_dims = dict(zip(
-                        ["Pitch Range", "Note Density", "Tempo", "Rhythm Variation",
-                         "Melodic Complexity", "Avg Velocity"],
-                        features_sim[:6]
+                        ["Pitch Range", "Pitch Variance", "Velocity Var.",
+                         "Melodic Complx.", "Note Density", "Rhythm Variation"],
+                        features_sim
                     ))
 
                     radar_midi = []
@@ -972,25 +972,25 @@ elif nav_option == "🎵 MIDI Analysis":
                             for i in range(len(ref_data))
                         ])
 
-                        prompt = f"""Analyze this classical piano piece based on its musical features.
+                        prompt = f"""Analyze this classical piano piece based on its complete musical profile.
 
 Musical Profile:
 - Key: {result['key']} (confidence: {result['key_confidence']}%)
 - Tempo: {result['tempo']:.0f} BPM
 - Pitch Range: {result['pitch_range']} semitones
 - Note Density: {result['note_density']:.1f} notes/sec
-- Melodic Complexity: {result['melodic_complexity']:.1f} (average interval size)
-- Rhythm Variation: {result['rhythm_std']:.2f} (std of note durations)
-- Dynamic Range: {int(dynamic_range)} (MIDI velocity range)
+- Melodic Complexity: {result['melodic_complexity']:.1f} (average interval between notes)
+- Rhythm Variation: {result['rhythm_std']:.2f} (std of durations)
+- Dynamic Range: {int(dynamic_range)} (MIDI velocity)
+- Polyphony: {result['avg_polyphony']:.1f} avg simultaneous voices
+  (Baroque counterpoint ~3.5, Romantic melody+accomp ~2.0, solo ~1.0)
+- Chromaticism: {result['pitch_entropy']:.3f} (0-1 scale)
+  (diatonic ~0.70, moderately chromatic ~0.85, highly chromatic ~0.95)
 
 The 5 most stylistically similar pieces in our classical piano dataset:
 {top5_desc}
 
-Please provide a concise analysis covering:
-1. Musical style and character — what kind of piece does this appear to be?
-2. Emotional expression — what feelings does the musical profile suggest?
-3. Performance insights — what would a pianist need to consider when playing this?
-4. How the features connect to the emotional character (e.g., "the wide pitch range and high rhythmic variation suggest dramatic contrasts")"""
+Interpret the musical meaning behind these numbers. What style/era does this profile suggest? How do the polyphony and chromaticism values specifically inform the composer attribution? Provide a concise but insightful analysis of style, emotion, and performance character."""
 
                         with st.spinner("AI Analyzing Music..."):
 
