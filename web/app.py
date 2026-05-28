@@ -788,102 +788,209 @@ elif nav_option == "🎵 MIDI Analysis":
 
                 else:
 
-                    st.success("✅ MIDI Analysis Complete")
+                    # ---- Build feature vector from uploaded MIDI ----
+                    notes_arr = pd.DataFrame(result["notes_data"])
+                    velocities = notes_arr["velocity"].values
+                    pitches = notes_arr["pitch"].values
+                    durations = notes_arr["duration"].values
+
+                    dynamic_range = velocities.max() - velocities.min()
+
+                    fv_upload = {
+                        "pitch_range": result["pitch_range"],
+                        "note_density": result["note_density"],
+                        "tempo": result["tempo"],
+                        "rhythm_std": result["rhythm_std"],
+                        "melodic_complexity": result["melodic_complexity"],
+                        "avg_velocity": result["avg_velocity"],
+                        "pitch_variance": result["pitch_variance"],
+                        "velocity_variance": result["velocity_variance"],
+                    }
+
+                    # build dataset profiles (same features as network graph)
+                    features_sim = list(fv_upload.keys())
+                    ds_mean = df[features_sim].mean()
+                    ds_std = df[features_sim].std()
+                    ds_std[ds_std == 0] = 1
+
+                    uploaded_norm = np.array([fv_upload[k] for k in features_sim])
+                    uploaded_norm = (uploaded_norm - ds_mean.values) / ds_std.values
+
+                    # ---- Piece-level k-NN matching ----
+                    ds_norm = (df[features_sim] - ds_mean) / ds_std
+                    ds_cos = np.dot(ds_norm.values, uploaded_norm) / (
+                        np.linalg.norm(ds_norm.values, axis=1) * np.linalg.norm(uploaded_norm) + 1e-10
+                    )
+                    top5_idx = np.argsort(ds_cos)[-5:][::-1]
+                    top5_pieces = df.iloc[top5_idx]
+
+                    # ---- Composer-level similarity ----
+                    composer_profiles = df.groupby(composer_col)[features_sim].mean()
+                    cp_norm = (composer_profiles - ds_mean) / ds_std
+                    cp_cos = np.dot(cp_norm.values, uploaded_norm) / (
+                        np.linalg.norm(cp_norm.values, axis=1) * np.linalg.norm(uploaded_norm) + 1e-10
+                    )
+                    top_comp_idx = np.argsort(cp_cos)[-5:][::-1]
+                    top_composers = [
+                        (composer_profiles.index[i], round(cp_cos[i] * 100, 1))
+                        for i in top_comp_idx
+                    ]
+
+                    # ---- meaningful metrics ----
+                    st.markdown("---")
+                    st.subheader("🎼 Musical Feature Profile")
+
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("🎹 Pitch Range", f"{result['pitch_range']} st",
+                                help="Width of the keyboard range used — wider = more dramatic contrasts")
+                    col2.metric("📊 Note Density", f"{result['note_density']:.1f} n/s",
+                                help="Notes per second — higher = busier texture")
+                    col3.metric("⏱ Tempo", f"{result['tempo']:.0f} BPM",
+                                help="Estimated tempo")
+
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("🎵 Melodic Complexity", f"{result['melodic_complexity']:.1f}",
+                                help="Average pitch interval between consecutive notes")
+                    col2.metric("🎶 Rhythm Variation", f"{result['rhythm_std']:.2f}",
+                                help="Standard deviation of note durations — higher = more rhythmic variety")
+                    col3.metric("🔑 Key", f"{result['key']} ({result['key_confidence']}%)",
+                                help="Detected musical key")
 
                     col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("💥 Dynamic Range", f"{int(dynamic_range)}",
+                                help="Velocity range (MIDI 0-127)")
+                    col2.metric("📝 Total Notes", result["total_notes"])
+                    col3.metric("📈 Pitch Variance", f"{result['pitch_variance']:.0f}")
+                    col4.metric("📉 Velocity Var.", f"{result['velocity_variance']:.0f}")
 
-                    col1.metric("Average Pitch", result["avg_pitch"])
-                    col2.metric("Average Duration", result["avg_duration"])
-                    col3.metric("Average Velocity", result["avg_velocity"])
-                    col4.metric("Total Notes", result["total_notes"])
+                    # ---- Feature radar vs dataset average ----
+                    st.markdown("---")
+                    st.subheader("🎯 Style Radar: Your MIDI vs Dataset Average")
 
-                    st.subheader("🎭 Emotion Prediction")
-                    st.info(result["emotion"])
+                    radar_dims = dict(zip(
+                        ["Pitch Range", "Note Density", "Tempo", "Rhythm Variation",
+                         "Melodic Complexity", "Avg Velocity"],
+                        features_sim[:6]
+                    ))
 
+                    radar_midi = []
+                    radar_global = []
+                    for label, feat in radar_dims.items():
+                        vmin, vmax = df[feat].min(), df[feat].max()
+                        rng = vmax - vmin if vmax != vmin else 1
+                        radar_midi.append((fv_upload[feat] - vmin) / rng)
+                        radar_global.append((df[feat].mean() - vmin) / rng)
+
+                    radar_labels = list(radar_dims.keys())
+                    fig_radar_midi = go.Figure()
+                    fig_radar_midi.add_trace(go.Scatterpolar(
+                        r=radar_midi + [radar_midi[0]],
+                        theta=radar_labels + [radar_labels[0]],
+                        fill="toself", name="Your MIDI",
+                        line=dict(color="#4F6FDE", width=2),
+                        fillcolor="rgba(79,111,222,0.25)"
+                    ))
+                    fig_radar_midi.add_trace(go.Scatterpolar(
+                        r=radar_global + [radar_global[0]],
+                        theta=radar_labels + [radar_labels[0]],
+                        fill="toself", name="Dataset Average",
+                        line=dict(color="#aaa", width=1.5, dash="dash"),
+                        fillcolor="rgba(170,170,170,0.1)"
+                    ))
+                    fig_radar_midi.update_layout(
+                        polar=dict(radialaxis=dict(range=[0, 1], showticklabels=False)),
+                        height=380,
+                        margin=dict(t=40, b=20, l=60, r=60),
+                        legend=dict(orientation="h", y=-0.1)
+                    )
+                    st.plotly_chart(fig_radar_midi, use_container_width=True)
+
+                    # ---- Composer Similarity ----
+                    st.markdown("---")
+                    st.subheader("🎼 Composer Style Similarity")
+                    st.caption("Cosine similarity on 8-dim musical feature vector")
+
+                    comp_data = []
+                    for name, score in top_composers:
+                        comp_data.append({"Composer": name, "Similarity": f"{score}%"})
+                    comp_sim_df = pd.DataFrame(comp_data)
+
+                    # bar chart
+                    fig_comp = px.bar(
+                        comp_sim_df, x="Similarity", y="Composer",
+                        orientation="h",
+                        title="Top 5 Closest Composers",
+                        color="Similarity", color_continuous_scale="Blues",
+                        text="Similarity"
+                    )
+                    fig_comp.update_traces(textposition="outside")
+                    fig_comp.update_layout(height=260, yaxis=dict(autorange="reversed"), showlegend=False)
+                    st.plotly_chart(fig_comp, use_container_width=True)
+
+                    st.caption("Most similar: **" + top_composers[0][0] + "** (" + str(top_composers[0][1]) + "%)")
+
+                    # ---- Nearest pieces (emotion reference) ----
+                    st.markdown("---")
+                    st.subheader("🎭 Closest Matches in Dataset")
+                    st.caption("These 5 classical works have the most similar musical features to your uploaded MIDI.")
+
+                    ref_data = []
+                    for i, (_, row) in enumerate(top5_pieces.iterrows()):
+                        ref_data.append({
+                            "Composer": row[composer_col],
+                            "Title": row["title"],
+                            "Emotion": row["emotion"],
+                            "Similarity": f"{round(ds_cos[top5_idx[i]] * 100, 1)}%"
+                        })
+                    st.dataframe(pd.DataFrame(ref_data), use_container_width=True, hide_index=True)
+
+                    predominant_emotion = top5_pieces["emotion"].mode().values[0] if len(top5_pieces) > 0 else "Calm"
+                    st.info(f"🎭 Predominant emotional character: **{predominant_emotion}** "
+                            f"(based on dataset nearest-neighbor matching, not hardcoded rules)")
+
+                    # ---- Piano Roll ----
+                    st.markdown("---")
                     st.subheader("🎹 Piano Roll Visualization")
 
                     notes_df_piano = pd.DataFrame(result["notes_data"])
-
                     fig_roll = px.scatter(
                         notes_df_piano,
-                        x="start",
-                        y="pitch",
-                        size="duration",
-                        color="velocity",
+                        x="start", y="pitch",
+                        size="duration", color="velocity",
                         title="Interactive Piano Roll",
-                        hover_data=[
-                            "start", "end", "duration",
-                            "pitch", "velocity"
-                        ]
+                        hover_data=["start", "end", "duration", "pitch", "velocity"]
                     )
                     fig_roll.update_layout(height=600)
                     st.plotly_chart(fig_roll, use_container_width=True)
 
-                    st.subheader("🎼 Composer Similarity Analysis")
-
-                    similarity_results = []
-                    composer_names = (
-                        df[composer_col]
-                        .dropna()
-                        .astype(str)
-                        .unique()
-                    )
-
-                    for composer in composer_names:
-
-                        comp_df = df[
-                            df[composer_col].astype(str)
-                            == composer
-                        ]
-
-                        if pitch_col is None or duration_col is None:
-                            continue
-
-                        comp_pitch = comp_df[pitch_col].mean()
-                        comp_duration = comp_df[duration_col].mean()
-
-                        distance = (
-                            (result["avg_pitch"] - comp_pitch) ** 2
-                            + (result["avg_duration"] - comp_duration) ** 2
-                        ) ** 0.5
-
-                        similarity_results.append({
-                            "composer": composer,
-                            "distance": round(distance, 2)
-                        })
-
-                    similarity_df = pd.DataFrame(
-                        similarity_results
-                    ).sort_values("distance")
-
-                    top_matches = similarity_df.head(5)
-
-                    st.dataframe(top_matches)
-
-                    best_match = top_matches.iloc[0]
-                    st.success(
-                        f"Most Similar Composer Style: "
-                        f"{best_match['composer']}"
-                    )
-
+                    # ---- AI Interpretation ----
                     if client:
+                        st.markdown("---")
 
-                        prompt = f"""
-Analyze this piano music.
+                        top5_desc = "\n".join([
+                            f"  {i+1}. {ref_data[i]['Composer']} — {ref_data[i]['Title']} ({ref_data[i]['Emotion']}, similarity: {ref_data[i]['Similarity']})"
+                            for i in range(len(ref_data))
+                        ])
 
-Features:
-- Average Pitch: {result["avg_pitch"]}
-- Average Duration: {result["avg_duration"]}
-- Average Velocity: {result["avg_velocity"]}
-- Total Notes: {result["total_notes"]}
-- Emotion: {result["emotion"]}
+                        prompt = f"""Analyze this classical piano piece based on its musical features.
 
-Please describe:
-1. Musical style
-2. Emotional characteristics
-3. Possible composer similarity
-4. Performance feeling
-"""
+Musical Profile:
+- Key: {result['key']} (confidence: {result['key_confidence']}%)
+- Tempo: {result['tempo']:.0f} BPM
+- Pitch Range: {result['pitch_range']} semitones
+- Note Density: {result['note_density']:.1f} notes/sec
+- Melodic Complexity: {result['melodic_complexity']:.1f} (average interval size)
+- Rhythm Variation: {result['rhythm_std']:.2f} (std of note durations)
+- Dynamic Range: {int(dynamic_range)} (MIDI velocity range)
+
+The 5 most stylistically similar pieces in our classical piano dataset:
+{top5_desc}
+
+Please provide a concise analysis covering:
+1. Musical style and character — what kind of piece does this appear to be?
+2. Emotional expression — what feelings does the musical profile suggest?
+3. Performance insights — what would a pianist need to consider when playing this?
+4. How the features connect to the emotional character (e.g., "the wide pitch range and high rhythmic variation suggest dramatic contrasts")"""
 
                         with st.spinner("AI Analyzing Music..."):
 
@@ -893,20 +1000,19 @@ Please describe:
                                     {
                                         "role": "system",
                                         "content": (
-                                            "You are a professional "
-                                            "classical music analyst."
+                                            "You are a professional classical music analyst "
+                                            "with expertise in piano repertoire, music theory, "
+                                            "and performance practice. Provide insightful, "
+                                            "musically-informed analysis in natural language. "
+                                            "Do NOT just restate the numbers — interpret what "
+                                            "they mean musically."
                                         )
                                     },
                                     {"role": "user", "content": prompt}
                                 ]
                             )
 
-                            answer = (
-                                response
-                                .choices[0]
-                                .message
-                                .content
-                            )
+                            answer = response.choices[0].message.content
 
                             st.subheader("🤖 AI Music Interpretation")
                             st.success(answer)
