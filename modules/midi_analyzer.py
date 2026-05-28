@@ -1,307 +1,136 @@
-import pretty_midi
+import mido
 import numpy as np
 from modules.key_detection import detect_key
 
 
-def analyze_midi(midi_file):
+def _parse_midi(midi_file_path):
+    mid = mido.MidiFile(midi_file_path)
+    current_time = 0.0
 
-    try:
-
-        midi_data = pretty_midi.PrettyMIDI(
-            midi_file
-        )
-
-    except Exception as e:
-
-        return {
-            "error": f"MIDI Parse Error: {e}"
-        }
-
-    pitches = []
-    durations = []
-    velocities = []
-    start_times = []
-
+    active_notes = {}  # (channel, note) -> (start_sec, velocity)
     notes_data = []
 
-    # =========================
-    # 提取音符
-    # =========================
-    for instrument in midi_data.instruments:
+    for msg in mid:
+        current_time += msg.time
 
-        # 跳过鼓轨
-        if instrument.is_drum:
-            continue
+        if msg.type in ("note_on", "note_off") and msg.channel != 9:
+            key = (msg.channel, msg.note)
+            is_note_on = msg.type == "note_on" and msg.velocity > 0
 
-        for note in instrument.notes:
+            if is_note_on:
+                active_notes[key] = (current_time, msg.velocity)
+            else:
+                if key in active_notes:
+                    start_sec, velocity = active_notes.pop(key)
+                    duration = current_time - start_sec
+                    if duration > 0:
+                        notes_data.append({
+                            "pitch": msg.note,
+                            "start": round(start_sec, 3),
+                            "end": round(current_time, 3),
+                            "duration": round(duration, 3),
+                            "velocity": velocity
+                        })
 
-            pitch = note.pitch
+    total_time = mid.length if mid.length else current_time
+    return notes_data, total_time
 
-            duration = note.end - note.start
 
-            velocity = note.velocity
+def _estimate_tempo(midi_file_path):
+    mid = mido.MidiFile(midi_file_path)
+    tempos = []
+    for msg in mid:
+        if msg.type == "set_tempo":
+            tempos.append(msg.tempo)
+    if tempos:
+        avg_mspb = sum(tempos) / len(tempos)
+        return round(60_000_000 / avg_mspb, 2)
+    return 120  # default
 
-            start_time = note.start
 
-            pitches.append(pitch)
+def analyze_midi(midi_file_path):
+    try:
+        notes_data, total_time = _parse_midi(midi_file_path)
+    except Exception as e:
+        return {"error": f"MIDI Parse Error: {e}"}
 
-            durations.append(duration)
+    if not notes_data:
+        return {"error": "No notes found in MIDI file"}
 
-            velocities.append(velocity)
+    pitches = np.array([n["pitch"] for n in notes_data])
+    durations = np.array([n["duration"] for n in notes_data])
+    velocities = np.array([n["velocity"] for n in notes_data])
 
-            start_times.append(start_time)
-
-            notes_data.append({
-                "pitch": pitch,
-                "start": round(note.start, 3),
-                "end": round(note.end, 3),
-                "duration": round(duration, 3),
-                "velocity": velocity
-            })
-
-    # =========================
-    # 空 MIDI 检测
-    # =========================
-    if len(pitches) == 0:
-
-        return {
-            "error": "No notes found in MIDI file"
-        }
-
-    # =========================
-    # 转 numpy
-    # =========================
-    pitches = np.array(pitches)
-
-    durations = np.array(durations)
-
-    velocities = np.array(velocities)
-
-    start_times = np.array(start_times)
-
-    # =========================
-    # 基础特征
-    # =========================
     avg_pitch = np.mean(pitches)
-
     avg_duration = np.mean(durations)
-
     avg_velocity = np.mean(velocities)
-
     total_notes = len(pitches)
 
-    # =========================
-    # 高级特征
-    # =========================
-
-    # 音高方差
     pitch_variance = np.var(pitches)
-
-    # 力度方差
     velocity_variance = np.var(velocities)
-
-    # 音域跨度
     pitch_range = np.max(pitches) - np.min(pitches)
-
-    # MIDI 总时长
-    total_time = midi_data.get_end_time()
 
     if total_time <= 0:
         total_time = 1
-
-    # 音符密度
     note_density = total_notes / total_time
 
-    # BPM
     try:
-        tempo = midi_data.estimate_tempo()
-
-    except:
+        tempo = _estimate_tempo(midi_file_path)
+    except Exception:
         tempo = 120
 
-    # =========================
-    # 节奏复杂度
-    # =========================
     rhythm_std = np.std(durations)
-
-    # =========================
-    # 音高跳跃复杂度
-    # =========================
     pitch_diff = np.diff(pitches)
+    melodic_complexity = float(np.mean(np.abs(pitch_diff))) if len(pitch_diff) > 0 else 0.0
 
-    melodic_complexity = np.mean(
-        np.abs(pitch_diff)
-    )
+    emotion = _detect_emotion(avg_pitch, avg_duration, avg_velocity, note_density, pitch_variance, tempo)
+    key_result = detect_key(midi_file_path)
 
-    # =========================
-    # 情绪分析
-    # =========================
-    emotion = detect_emotion(
-        avg_pitch,
-        avg_duration,
-        avg_velocity,
-        note_density,
-        pitch_variance,
-        tempo
-    )
-    key_result = detect_key(midi_file)
+    def r(v):
+        return round(float(v), 2)
 
-    # =========================
-    # 特征向量（机器学习）
-    # =========================
     feature_vector = {
-
-        "avg_pitch": round(avg_pitch, 2),
-
-        "avg_duration": round(avg_duration, 2),
-
-        "avg_velocity": round(avg_velocity, 2),
-
-        "pitch_variance": round(
-            pitch_variance,
-            2
-        ),
-
-        "velocity_variance": round(
-            velocity_variance,
-            2
-        ),
-
-        "pitch_range": round(
-            pitch_range,
-            2
-        ),
-
-        "note_density": round(
-            note_density,
-            2
-        ),
-
-        "tempo": round(
-            tempo,
-            2
-        ),
-
-        "rhythm_std": round(
-            rhythm_std,
-            2
-        ),
-
-        "melodic_complexity": round(
-            melodic_complexity,
-            2
-        ),
-
-        "total_notes": total_notes
-    }
-
-    # =========================
-    # 返回结果
-    # =========================
-    return {
-
-        # 基础特征
-        "avg_pitch": round(avg_pitch, 2),
-
-        "avg_duration": round(avg_duration, 2),
-
-        "avg_velocity": round(avg_velocity, 2),
-
+        "avg_pitch": r(avg_pitch),
+        "avg_duration": r(avg_duration),
+        "avg_velocity": r(avg_velocity),
+        "pitch_variance": r(pitch_variance),
+        "velocity_variance": r(velocity_variance),
+        "pitch_range": r(pitch_range),
+        "note_density": r(note_density),
+        "tempo": r(tempo),
+        "rhythm_std": r(rhythm_std),
+        "melodic_complexity": r(melodic_complexity),
         "total_notes": total_notes,
+    }
 
-        # 高级特征
-        "pitch_variance": round(
-            pitch_variance,
-            2
-        ),
-
-        "velocity_variance": round(
-            velocity_variance,
-            2
-        ),
-
-        "pitch_range": round(
-            pitch_range,
-            2
-        ),
-
-        "note_density": round(
-            note_density,
-            2
-        ),
-
-        "tempo": round(
-            tempo,
-            2
-        ),
-
-        "rhythm_std": round(
-            rhythm_std,
-            2
-        ),
-
-        "melodic_complexity": round(
-            melodic_complexity,
-            2
-        ),
-
-        # 情绪
+    return {
+        "avg_pitch": r(avg_pitch),
+        "avg_duration": r(avg_duration),
+        "avg_velocity": r(avg_velocity),
+        "total_notes": total_notes,
+        "pitch_variance": r(pitch_variance),
+        "velocity_variance": r(velocity_variance),
+        "pitch_range": r(pitch_range),
+        "note_density": r(note_density),
+        "tempo": r(tempo),
+        "rhythm_std": r(rhythm_std),
+        "melodic_complexity": r(melodic_complexity),
         "emotion": emotion,
-
-        # Piano Roll
         "notes_data": notes_data,
-
-        # ML 特征
         "feature_vector": feature_vector,
-
         "key": key_result["key"],
-        "key_confidence": key_result["confidence"]
+        "key_confidence": key_result["confidence"],
     }
 
 
-# =========================
-# 情绪识别
-# =========================
-def detect_emotion(
-    pitch,
-    duration,
-    velocity,
-    density,
-    pitch_variance,
-    tempo
-):
-
-    # 激烈
-    if (
-        velocity > 80
-        and density > 10
-        and tempo > 140
-    ):
+def _detect_emotion(pitch, duration, velocity, density, pitch_variance, tempo):
+    if velocity > 80 and density > 10 and tempo > 140:
         return "Energetic"
-
-    # 悲伤
-    elif (
-        duration > 0.7
-        and pitch < 62
-        and tempo < 100
-    ):
+    elif duration > 0.7 and pitch < 62 and tempo < 100:
         return "Sad"
-
-    # 黑暗
-    elif (
-        pitch < 58
-        and pitch_variance < 45
-    ):
+    elif pitch < 58 and pitch_variance < 45:
         return "Dark"
-
-    # 快乐
-    elif (
-        pitch > 67
-        and velocity > 65
-        and tempo > 110
-    ):
+    elif pitch > 67 and velocity > 65 and tempo > 110:
         return "Happy"
-
-    # 平静
     else:
         return "Calm"

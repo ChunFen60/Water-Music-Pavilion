@@ -762,7 +762,7 @@ elif nav_option == "🎵 MIDI Analysis":
     st.header("🎵 MIDI Upload & Analysis")
 
     if not MIDI_AVAILABLE:
-        st.warning("⚠ MIDI analysis is not available in the cloud deployment. Please run the app locally for MIDI features.")
+        st.warning("⚠ MIDI module not available. Please check your installation.")
     else:
         uploaded_file = st.file_uploader(
             "Upload MIDI File",
