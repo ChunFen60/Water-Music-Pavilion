@@ -486,67 +486,71 @@ if nav_option == "📊 Dataset Overview":
     # -- Composer Similarity Network --
     st.subheader("🔗 Composer Similarity Network")
 
-    features_net = ["pitch_range", "note_density", "tempo", "rhythm_std",
-                    "melodic_complexity", "avg_velocity", "pitch_variance"]
-    composer_profiles = df.groupby(composer_col)[features_net].mean().dropna()
-    profiles_np = composer_profiles.values
-    means = profiles_np.mean(axis=0)
-    stds = profiles_np.std(axis=0)
-    stds[stds == 0] = 1
-    profiles_norm = (profiles_np - means) / stds
+    try:
+        features_net = ["pitch_range", "note_density", "tempo", "rhythm_std",
+                        "melodic_complexity", "avg_velocity", "pitch_variance"]
+        composer_profiles = df.groupby(composer_col)[features_net].mean().dropna()
+        profiles_np = composer_profiles.values
+        means = profiles_np.mean(axis=0)
+        stds = profiles_np.std(axis=0)
+        stds[stds == 0] = 1
+        profiles_norm = (profiles_np - means) / stds
 
-    # cosine similarity
-    norms = np.linalg.norm(profiles_norm, axis=1)
-    sim_matrix = np.dot(profiles_norm, profiles_norm.T) / np.outer(norms, norms)
+        # cosine similarity
+        norms_arr = np.linalg.norm(profiles_norm, axis=1)
+        sim_matrix = np.dot(profiles_norm, profiles_norm.T) / np.outer(norms_arr, norms_arr)
 
-    # PCA via SVD for 2D positions
-    centered = profiles_norm - profiles_norm.mean(axis=0)
-    U, S, Vt = np.linalg.svd(centered, full_matrices=False)
-    pc_scores = centered @ Vt[:2].T
+        # PCA via SVD for 2D positions
+        centered = profiles_norm - profiles_norm.mean(axis=0)
+        U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+        pc_scores = centered @ Vt[:2].T
 
-    composer_names = composer_profiles.index.tolist()
-    n_comp = len(composer_names)
+        composer_names = composer_profiles.index.tolist()
+        n_comp = len(composer_names)
 
-    fig_net = go.Figure()
+        fig_net = go.Figure()
 
-    # edges: top 2 connections per composer
-    for i in range(n_comp):
-        sims = sim_matrix[i].copy()
-        sims[i] = -1
-        top_k = np.argsort(sims)[-2:]
-        for j in top_k:
-            if i < j and sims[j] > 0.3:
-                fig_net.add_trace(go.Scatter(
-                    x=[pc_scores[i, 0], pc_scores[j, 0]],
-                    y=[pc_scores[i, 1], pc_scores[j, 1]],
-                    mode="lines",
-                    line=dict(width=sims[j] * 1.8, color="rgba(150,150,150,0.3)"),
-                    hoverinfo="none",
-                    showlegend=False
-                ))
+        for i in range(n_comp):
+            sims = sim_matrix[i].copy()
+            sims[i] = -1
+            top_k = np.argsort(sims)[-2:]
+            for j in top_k:
+                if i < j and sims[j] > 0.3:
+                    fig_net.add_trace(go.Scatter(
+                        x=[pc_scores[i, 0], pc_scores[j, 0]],
+                        y=[pc_scores[i, 1], pc_scores[j, 1]],
+                        mode="lines",
+                        line=dict(width=sims[j] * 1.8, color="Grey"),
+                        opacity=0.3,
+                        hoverinfo="none",
+                        showlegend=False
+                    ))
 
-    # nodes
-    fig_net.add_trace(go.Scatter(
-        x=pc_scores[:, 0],
-        y=pc_scores[:, 1],
-        mode="markers+text",
-        text=composer_names,
-        textposition="top center",
-        textfont=dict(size=9),
-        marker=dict(size=12, color=np.arange(n_comp), colorscale="Viridis",
-                    showscale=False, line=dict(width=1, color="white")),
-        hoverinfo="text",
-        showlegend=False
-    ))
+        fig_net.add_trace(go.Scatter(
+            x=pc_scores[:, 0],
+            y=pc_scores[:, 1],
+            mode="markers+text",
+            text=composer_names,
+            textposition="top center",
+            textfont=dict(size=9, color="white"),
+            marker=dict(size=12, color=np.arange(n_comp), colorscale="Viridis",
+                        showscale=False, line=dict(width=1, color="white")),
+            hoverinfo="text",
+            showlegend=False
+        ))
 
-    fig_net.update_layout(
-        title="Composer Style Similarity Map (PCA projection — closer = more similar)",
-        height=620,
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
-        margin=dict(t=40, b=20, l=20, r=20)
-    )
-    st.plotly_chart(fig_net, use_container_width=True)
+        fig_net.update_layout(
+            title="Composer Style Similarity Map (PCA projection — closer = more similar)",
+            height=620,
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
+            margin=dict(t=40, b=20, l=20, r=20)
+        )
+        st.plotly_chart(fig_net, use_container_width=True)
+    except Exception as e:
+        st.warning("⚠ Composer network visualization unavailable. Check app logs for details.")
+        import sys
+        print(f"NETWORK_ERROR: {e}", file=sys.stderr)
 
     # -- 数据表预览 --
     st.subheader("🧾 Full Dataset Preview")
