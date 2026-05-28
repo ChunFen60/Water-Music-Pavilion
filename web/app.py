@@ -736,8 +736,6 @@ elif nav_option == "🎼 Composer Analysis":
         df,
         x="avg_velocity",
         y="avg_pitch",
-        marginal_x="histogram",
-        marginal_y="histogram",
         title="Touch & Range Map — Where do composers place their notes?",
         labels={
             "avg_velocity": "Average Velocity (MIDI 0-127)",
