@@ -35,6 +35,85 @@ from web.social import (
     upload_file, get_shared_files, get_file
 )
 
+# ---- new analysis modules ----
+try:
+    from modules.emotion_model import (
+        compute_from_analyze_result,
+        compute_from_dataframe_row,
+    )
+    EMOTION_MODEL_AVAILABLE = True
+except ImportError:
+    EMOTION_MODEL_AVAILABLE = False
+
+# ---- dimensionality reduction ----
+UMAP_AVAILABLE = False
+TSNE_AVAILABLE = False
+try:
+    import umap.umap_ as umap
+    UMAP_AVAILABLE = True
+except ImportError:
+    try:
+        import umap as umap
+        UMAP_AVAILABLE = True
+    except ImportError:
+        pass
+
+try:
+    from sklearn.manifold import TSNE
+    TSNE_AVAILABLE = True
+except ImportError:
+    pass
+
+# ---- interactive table helper ----
+def _interactive_table(df, key="table", page_size=20, height=400):
+    """Display a DataFrame with search, sort, pagination, and CSV export."""
+    # Search
+    search = st.text_input("Search", placeholder="Type to filter...",
+                          key=f"search_{key}", label_visibility="collapsed")
+    if search:
+        mask = np.column_stack([
+            df[col].astype(str).str.contains(search, case=False, na=False)
+            for col in df.columns
+        ]).any(axis=1)
+        filtered = df[mask]
+    else:
+        filtered = df
+
+    # Sort
+    sort_col = st.selectbox("Sort by", ["(none)"] + list(filtered.columns),
+                           key=f"sort_{key}", label_visibility="collapsed")
+    if sort_col != "(none)":
+        ascending = st.checkbox("Ascending", value=True, key=f"asc_{key}")
+        filtered = filtered.sort_values(sort_col, ascending=ascending)
+
+    # Pagination
+    n = len(filtered)
+    total_pages = max(1, (n + page_size - 1) // page_size)
+    if f"page_{key}" not in st.session_state:
+        st.session_state[f"page_{key}"] = 0
+    page = st.session_state[f"page_{key}"]
+    page = max(0, min(page, total_pages - 1))
+
+    c1, c2, c3, c4 = st.columns([1, 1, 2, 1])
+    with c1:
+        if st.button("Prev", key=f"prev_{key}", disabled=(page == 0)):
+            st.session_state[f"page_{key}"] -= 1
+            st.rerun()
+    with c2:
+        if st.button("Next", key=f"next_{key}", disabled=(page >= total_pages - 1)):
+            st.session_state[f"page_{key}"] += 1
+            st.rerun()
+    with c3:
+        st.caption(f"Page {page+1} of {total_pages}  ({n} rows)")
+    with c4:
+        csv = filtered.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("Export CSV", csv, f"{key}.csv",
+                          "text/csv", key=f"dl_{key}")
+
+    start = page * page_size
+    st.dataframe(filtered.iloc[start:start+page_size],
+                use_container_width=True, height=height)
+
 # =========================
 # Session State Init
 # =========================
@@ -485,7 +564,7 @@ if nav_option == "📊 Dataset Overview":
     st.plotly_chart(fig_quad, use_container_width=True)
 
     # -- Composer Similarity Network --
-    st.subheader("🔗 Composer Similarity Network")
+    st.subheader("🔗 Composer Style Map")
 
     try:
         features_net = ["pitch_range", "note_density", "tempo", "rhythm_std",
@@ -497,51 +576,101 @@ if nav_option == "📊 Dataset Overview":
         stds[stds == 0] = 1
         profiles_norm = (profiles_np - means) / stds
 
-        # cosine similarity
+        # cosine similarity matrix
         norms_arr = np.linalg.norm(profiles_norm, axis=1)
         sim_matrix = np.dot(profiles_norm, profiles_norm.T) / np.outer(norms_arr, norms_arr)
-
-        # PCA via SVD for 2D positions
-        centered = profiles_norm - profiles_norm.mean(axis=0)
-        U, S, Vt = np.linalg.svd(centered, full_matrices=False)
-        pc_scores = centered @ Vt[:2].T
 
         composer_names = composer_profiles.index.tolist()
         n_comp = len(composer_names)
 
+        # Dimensionality reduction method selector
+        methods = ["UMAP", "t-SNE", "PCA"]
+        available = [UMAP_AVAILABLE, TSNE_AVAILABLE, True]
+        method_labels = [
+            f"{m} {'(recommended)' if m=='UMAP' else ''}{' (unavailable)' if not a else ''}"
+            for m, a in zip(methods, available)
+        ]
+        default_method = "UMAP" if UMAP_AVAILABLE else ("t-SNE" if TSNE_AVAILABLE else "PCA")
+        chosen_method = default_method
+        # Only show radio if multiple methods available
+        if sum(available) > 1:
+            chosen_method = st.radio(
+                "Projection method", method_labels,
+                index=[i for i, a in enumerate(available) if a and methods[i]==default_method][0]
+                if default_method in methods else 0,
+                horizontal=True, label_visibility="collapsed"
+            )
+            # Strip availability note
+            for m in methods:
+                if m in chosen_method:
+                    chosen_method = m
+                    break
+
+        # Compute 2D embedding
+        if chosen_method == "UMAP" and UMAP_AVAILABLE:
+            reducer = umap.UMAP(n_neighbors=min(8, n_comp-1), min_dist=0.3,
+                               n_components=2, random_state=42)
+            embedding = reducer.fit_transform(profiles_norm)
+            method_name = "UMAP"
+        elif chosen_method == "t-SNE" and TSNE_AVAILABLE:
+            tsne = TSNE(n_components=2, perplexity=min(6, n_comp-1),
+                       random_state=42)
+            embedding = tsne.fit_transform(profiles_norm)
+            method_name = "t-SNE"
+        else:
+            # PCA via SVD
+            centered = profiles_norm - profiles_norm.mean(axis=0)
+            U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+            embedding = centered @ Vt[:2].T
+            method_name = "PCA"
+
+        # Jitter text positions to reduce overlap
+        np.random.seed(42)
+        positions = embedding.copy()
+        jitter = np.random.randn(n_comp, 2) * np.std(positions, axis=0) * 0.03
+        text_pos = positions + jitter
+
         fig_net = go.Figure()
 
+        # Draw similarity edges (threshold 0.4 for cleaner visualization)
         for i in range(n_comp):
             sims = sim_matrix[i].copy()
             sims[i] = -1
-            top_k = np.argsort(sims)[-2:]
+            top_k = np.argsort(sims)[-3:]
             for j in top_k:
-                if i < j and sims[j] > 0.3:
+                if i < j and sims[j] > 0.4:
                     fig_net.add_trace(go.Scatter(
-                        x=[pc_scores[i, 0], pc_scores[j, 0]],
-                        y=[pc_scores[i, 1], pc_scores[j, 1]],
+                        x=[positions[i, 0], positions[j, 0]],
+                        y=[positions[i, 1], positions[j, 1]],
                         mode="lines",
-                        line=dict(width=sims[j] * 1.8, color="Grey"),
-                        opacity=0.3,
+                        line=dict(width=sims[j] * 1.5, color="Grey"),
+                        opacity=0.25,
                         hoverinfo="none",
                         showlegend=False
                     ))
 
         fig_net.add_trace(go.Scatter(
-            x=pc_scores[:, 0],
-            y=pc_scores[:, 1],
-            mode="markers+text",
-            text=composer_names,
-            textposition="top center",
-            textfont=dict(size=9, color="white"),
+            x=positions[:, 0],
+            y=positions[:, 1],
+            mode="markers",
             marker=dict(size=12, color=np.arange(n_comp), colorscale="Viridis",
-                        showscale=False, line=dict(width=1, color="white")),
+                       showscale=False, line=dict(width=1, color="white")),
+            hovertext=composer_names,
             hoverinfo="text",
             showlegend=False
         ))
 
+        # Text labels with jitter (as separate trace for cleaner rendering)
+        for i, name in enumerate(composer_names):
+            fig_net.add_annotation(
+                x=text_pos[i, 0], y=text_pos[i, 1],
+                text=name, showarrow=False,
+                font=dict(size=8, color="#ccc"),
+                bgcolor="rgba(0,0,0,0.5)", borderpad=2
+            )
+
         fig_net.update_layout(
-            title="Composer Style Similarity Map (PCA projection — closer = more similar)",
+            title=f"Composer Style Similarity Map ({method_name} — closer = more similar)",
             height=620,
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
@@ -549,13 +678,13 @@ if nav_option == "📊 Dataset Overview":
         )
         st.plotly_chart(fig_net, use_container_width=True)
     except Exception as e:
-        st.warning("⚠ Composer network visualization unavailable. Check app logs for details.")
+        st.warning("Composer network visualization unavailable. Check app logs for details.")
         import sys
         print(f"NETWORK_ERROR: {e}", file=sys.stderr)
 
     # -- 数据表预览 --
     st.subheader("🧾 Full Dataset Preview")
-    st.dataframe(df.head(50))
+    _interactive_table(df, key="dataset_overview", page_size=25, height=600)
 
 # =========================
 # Section: Composer Analysis
@@ -569,78 +698,71 @@ elif nav_option == "🎼 Composer Analysis":
         .unique()
     )
 
-    selected_composer = st.sidebar.selectbox(
-        "Select Composer",
-        composer_list
+    selected_composers = st.sidebar.multiselect(
+        "Select Composers (1-5)",
+        composer_list,
+        default=[composer_list[0]],
+        max_selections=5
     )
 
-    composer_df = df[
-        df[composer_col].astype(str)
-        == selected_composer
-    ]
+    if not selected_composers:
+        st.warning("Select at least one composer to view analysis.")
+        st.stop()
 
-    all_others_df = df[
-        df[composer_col].astype(str)
-        != selected_composer
-    ]
+    # Primary composer for detailed view
+    primary = selected_composers[0]
+    composer_df = df[df[composer_col].astype(str) == primary]
+    other_composers = [c for c in selected_composers if c != primary]
 
-    st.header(
-        f"🎼 Composer Style Profile: {selected_composer}"
-    )
+    st.header(f"🎼 Composer Style Profile: {', '.join(selected_composers)}")
 
-    # -- 关键风格指标 --
+    # -- 关键风格指标（主要作曲家）--
     col1, col2, col3, col4, col5 = st.columns(5)
-
     col1.metric("Pieces", len(composer_df))
-    col2.metric(
-        "Pitch Range",
-        f"{composer_df['pitch_range'].mean():.0f} st"
-    )
-    col3.metric(
-        "Note Density",
-        f"{composer_df['note_density'].mean():.1f}/s"
-    )
-    col4.metric(
-        "Tempo",
-        f"{composer_df['tempo'].mean():.0f} BPM"
-    )
-    col5.metric(
-        "Melodic Complexity",
-        f"{composer_df['melodic_complexity'].mean():.1f}"
-    )
+    col2.metric("Pitch Range", f"{composer_df['pitch_range'].mean():.0f} st")
+    col3.metric("Note Density", f"{composer_df['note_density'].mean():.1f}/s")
+    col4.metric("Tempo", f"{composer_df['tempo'].mean():.0f} BPM")
+    col5.metric("Melodic Complexity", f"{composer_df['melodic_complexity'].mean():.1f}")
 
-    # -- 风格雷达图：五维对比 --
-    st.subheader("🎹 Five-Dimensional Style Radar")
+    # -- 风格雷达图：多作曲家对比 --
+    st.subheader("🎹 Style Radar: Multi-Composer Comparison")
 
     import plotly.graph_objects as go
+    from plotly import colors as pcolors
 
     dimensions = ["pitch_range", "note_density", "tempo", "rhythm_std", "melodic_complexity"]
     dim_labels = ["Pitch Range", "Note Density", "Tempo", "Rhythm Variation", "Melodic Complexity"]
 
-    # 归一化到 0-1
+    # Normalize to 0-1
     norms = {}
     for d in dimensions:
         vmin, vmax = df[d].min(), df[d].max()
         norms[d] = (vmin, vmax)
 
-    composer_vals = []
+    fig_radar = go.Figure()
+    palette = pcolors.qualitative.Plotly[:max(len(selected_composers), 2)]
+
+    for idx, comp in enumerate(selected_composers):
+        comp_df_i = df[df[composer_col].astype(str) == comp]
+        vals = []
+        for d in dimensions:
+            vmin, vmax = norms[d]
+            vals.append(round((comp_df_i[d].mean() - vmin) / (vmax - vmin), 3))
+        color = palette[idx % len(palette)]
+        fig_radar.add_trace(go.Scatterpolar(
+            r=vals + [vals[0]],
+            theta=dim_labels + [dim_labels[0]],
+            fill='toself',
+            name=comp,
+            line=dict(color=color, width=2),
+            fillcolor=color.replace('rgb', 'rgba').replace(')', ', 0.2)')
+        ))
+
+    # Global average
     global_vals = []
     for d in dimensions:
         vmin, vmax = norms[d]
-        c_val = (composer_df[d].mean() - vmin) / (vmax - vmin)
-        g_val = (df[d].mean() - vmin) / (vmax - vmin)
-        composer_vals.append(round(c_val, 3))
-        global_vals.append(round(g_val, 3))
-
-    fig_radar = go.Figure()
-    fig_radar.add_trace(go.Scatterpolar(
-        r=composer_vals + [composer_vals[0]],
-        theta=dim_labels + [dim_labels[0]],
-        fill='toself',
-        name=selected_composer,
-        line=dict(color='#4F6FDE', width=2),
-        fillcolor='rgba(79, 111, 222, 0.25)'
-    ))
+        global_vals.append(round((df[d].mean() - vmin) / (vmax - vmin), 3))
     fig_radar.add_trace(go.Scatterpolar(
         r=global_vals + [global_vals[0]],
         theta=dim_labels + [dim_labels[0]],
@@ -649,23 +771,34 @@ elif nav_option == "🎼 Composer Analysis":
         line=dict(color='#aaa', width=1.5, dash='dash'),
         fillcolor='rgba(170, 170, 170, 0.1)'
     ))
+
+    n_comp = len(selected_composers)
     fig_radar.update_layout(
         polar=dict(radialaxis=dict(range=[0, 1], showticklabels=False)),
-        height=420,
+        height=400 + 20 * n_comp,
         margin=dict(t=40, b=40, l=60, r=60),
-        legend=dict(orientation="h", y=-0.1)
+        legend=dict(orientation="h", y=-0.1, font=dict(size=11))
     )
     st.plotly_chart(fig_radar, use_container_width=True)
 
-    # -- 风格散点：该作曲家 vs 其他 --
+    # -- 风格散点：高亮所有选中作曲家 --
     st.subheader("🎹 Style Position: Range × Density")
 
-    composer_df_display = composer_df.copy()
-    composer_df_display["Group"] = selected_composer
-    all_others_display = all_others_df.copy()
-    all_others_display["Group"] = "Other Composers"
+    combined_parts = []
+    color_map = {}
+    palette_full = pcolors.qualitative.Plotly[:len(selected_composers)]
+    for idx, comp in enumerate(selected_composers):
+        subset = df[df[composer_col].astype(str) == comp].copy()
+        subset["Group"] = comp
+        combined_parts.append(subset)
+        color_map[comp] = palette_full[idx % len(palette_full)]
 
-    combined = pd.concat([composer_df_display, all_others_display])
+    others = df[~df[composer_col].astype(str).isin(selected_composers)].copy()
+    others["Group"] = "Other Composers"
+    combined_parts.append(others)
+    color_map["Other Composers"] = "#ccc"
+
+    combined = pd.concat(combined_parts)
 
     fig_pos = px.scatter(
         combined,
@@ -674,11 +807,8 @@ elif nav_option == "🎼 Composer Analysis":
         color="Group",
         size="tempo",
         hover_name="title",
-        title=f"{selected_composer} vs All Others",
-        color_discrete_map={
-            selected_composer: "#4F6FDE",
-            "Other Composers": "#ccc"
-        },
+        title=f"{' & '.join(selected_composers)} vs All Others",
+        color_discrete_map=color_map,
         labels={
             "pitch_range": "Pitch Range (semitones)",
             "note_density": "Note Density (notes/sec)"
@@ -697,11 +827,8 @@ elif nav_option == "🎼 Composer Analysis":
         y="melodic_complexity",
         color="Group",
         hover_name="title",
-        title=f"{selected_composer} — Rhythm × Melody Space",
-        color_discrete_map={
-            selected_composer: "#4F6FDE",
-            "Other Composers": "#ccc"
-        },
+        title=f"{' & '.join(selected_composers)} — Rhythm × Melody Space",
+        color_discrete_map=color_map,
         labels={
             "rhythm_std": "Rhythm Variation (std)",
             "melodic_complexity": "Melodic Complexity"
@@ -748,11 +875,17 @@ elif nav_option == "🎼 Composer Analysis":
     st.plotly_chart(fig_vp, use_container_width=True)
 
     # -- 作品列表 --
-    st.subheader("🧾 Works by " + selected_composer)
-    st.dataframe(
-        composer_df[["title", "emotion", "pitch_range", "note_density", "tempo", "melodic_complexity"]],
-        use_container_width=True,
-        height=600
+    st.subheader("🧾 Works by " + primary)
+    emotion_display = "emotion_label" if "emotion_label" in composer_df.columns else "emotion"
+    cols_display = ["title"]
+    if emotion_display in composer_df.columns:
+        cols_display.append(emotion_display)
+    elif "emotion_legacy" in composer_df.columns:
+        cols_display.append("emotion_legacy")
+    cols_display += ["pitch_range", "note_density", "tempo", "melodic_complexity"]
+    _interactive_table(
+        composer_df[[c for c in cols_display if c in composer_df.columns]],
+        key="composer_works", page_size=20, height=600
     )
 
 # =========================
@@ -936,17 +1069,84 @@ elif nav_option == "🎵 MIDI Analysis":
 
                     ref_data = []
                     for i, (_, row) in enumerate(top5_pieces.iterrows()):
-                        ref_data.append({
-                            "Composer": row[composer_col],
-                            "Title": row["title"],
-                            "Emotion": row["emotion"],
-                            "Similarity": f"{round(ds_cos[top5_idx[i]] * 100, 1)}%"
-                        })
-                    st.dataframe(pd.DataFrame(ref_data), use_container_width=True, hide_index=True)
+                        emotion_col_nn = "emotion_label" if "emotion_label" in top5_pieces.columns else "emotion"
+                    ref_data.append({
+                        "Composer": row[composer_col],
+                        "Title": row["title"],
+                        "Emotion": row.get(emotion_col_nn, row.get("emotion", "")),
+                        "Similarity": f"{round(ds_cos[top5_idx[i]] * 100, 1)}%"
+                    })
+                    _interactive_table(pd.DataFrame(ref_data), key="nearest_matches", page_size=5)
 
-                    predominant_emotion = top5_pieces["emotion"].mode().values[0] if len(top5_pieces) > 0 else "Calm"
-                    st.info(f"🎭 Predominant emotional character: **{predominant_emotion}** "
-                            f"(based on dataset nearest-neighbor matching, not hardcoded rules)")
+                    if emotion_col_nn in top5_pieces.columns:
+                        predominant_emotion = top5_pieces[emotion_col_nn].mode().values[0] if len(top5_pieces) > 0 else "Calm"
+                    else:
+                        predominant_emotion = "Calm"
+                    st.info(f"Predominant emotional character: **{predominant_emotion}** "
+                            f"(based on dataset nearest-neighbor matching)")
+
+                    # ---- VA Position for uploaded MIDI ----
+                    if EMOTION_MODEL_AVAILABLE:
+                        st.markdown("---")
+                        st.subheader("🎯 Your MIDI in Emotion Space")
+                        va = compute_from_analyze_result(result)
+                        col_v, col_a, col_l = st.columns(3)
+                        col_v.metric("Valence", f"{va['valence_score']:.3f}",
+                                    help="Pleasantness (0-1)")
+                        col_a.metric("Arousal", f"{va['arousal_score']:.3f}",
+                                    help="Energy/intensity (0-1)")
+                        col_l.metric("Emotion", va['emotion_label'],
+                                    help=f"Sub-region: {va['sub_region']}")
+
+                    # ---- Harmony Analysis ----
+                    if "chord_types" in result and result.get("chord_types"):
+                        st.markdown("---")
+                        st.subheader("🎸 Harmony Analysis")
+
+                        hcol1, hcol2, hcol3 = st.columns(3)
+                        hcol1.metric("Chord Diversity",
+                                    f"{result.get('chord_diversity', 0):.3f}")
+                        hcol2.metric("Harmonic Rhythm",
+                                    f"{result.get('harmonic_rhythm', 0):.2f} chg/s")
+                        hcol3.metric("Tonic/Dominant",
+                                    f"{result.get('tonic_dominant_ratio', 0.5):.2f}")
+
+                        hcol1.metric("Bass Step Ratio",
+                                    f"{result.get('bass_motion_step_ratio', 0):.2f}")
+                        hcol2.metric("Chromatic Chords",
+                                    f"{result.get('chromatic_pct', 0)*100:.1f}%")
+                        hcol3.metric("Total Chords",
+                                    f"{result.get('total_chords_detected', 0)}")
+
+                        # Chord type pie chart
+                        chord_types = result["chord_types"]
+                        if chord_types:
+                            chord_pie = px.pie(
+                                names=list(chord_types.keys()),
+                                values=list(chord_types.values()),
+                                title="Chord Type Distribution",
+                                hole=0.4
+                            )
+                            chord_pie.update_layout(height=300, showlegend=True)
+                            st.plotly_chart(chord_pie, use_container_width=True)
+
+                        # Cadence timeline
+                        cadences = result.get("cadences", [])
+                        if cadences:
+                            st.subheader("🎵 Cadence Map")
+                            cad_df = pd.DataFrame(cadences)
+                            fig_cad = px.scatter(
+                                cad_df, x="time", y="type",
+                                color="type", size="strength",
+                                title="Cadences Along the Timeline",
+                                labels={"time": "Time (s)", "type": "Cadence Type"}
+                            )
+                            fig_cad.update_layout(height=250, showlegend=False)
+                            st.plotly_chart(fig_cad, use_container_width=True)
+                        else:
+                            pc = result.get("cadence_counts", {})
+                            if pc:
+                                st.caption(f"Cadence counts: {pc}")
 
                     # ---- Piano Roll ----
                     st.markdown("---")
@@ -1027,97 +1227,141 @@ elif nav_option == "🎭 Emotion Analysis":
 
     st.header("🎭 Emotion Analysis Dashboard")
 
-    # -- 检查 emotion 字段 --
-    emotion_col = next(
-        (c for c in df.columns if "emotion" in c.lower()),
-        None
+    # Detect emotion columns
+    has_va = "valence_score" in df.columns and "arousal_score" in df.columns
+    has_label = "emotion_label" in df.columns
+    emotion_col = (
+        "emotion_label" if has_label else
+        next((c for c in df.columns if "emotion" in c.lower()), None)
     )
 
-    if emotion_col:
-        st.subheader("😊 Emotion Distribution")
+    if has_va:
+        # ---- Valence-Arousal 2D Space ----
+        st.subheader("🎯 Valence-Arousal Emotion Space")
 
-        emotion_counts = (
-            df[emotion_col]
-            .dropna()
-            .astype(str)
-            .value_counts()
-            .reset_index()
+        # Quadrant boundary
+        v_med = df["valence_score"].median()
+        a_med = df["arousal_score"].median()
+
+        fig_va = px.scatter(
+            df,
+            x="valence_score",
+            y="arousal_score",
+            color=emotion_col if has_label else composer_col,
+            size="tempo",
+            hover_name="title",
+            hover_data=[composer_col] + ([emotion_col] if has_label else []),
+            title="Each Piece in Valence-Arousal Space (size = tempo)",
+            labels={
+                "valence_score": "Valence (pleasantness) →",
+                "arousal_score": "Arousal (energy) →",
+            },
+            opacity=0.7
         )
-        emotion_counts.columns = ["Emotion", "Count"]
+        fig_va.add_hline(y=a_med, line_dash="dash", line_color="grey", opacity=0.4)
+        fig_va.add_vline(x=v_med, line_dash="dash", line_color="grey", opacity=0.4)
 
-        fig_pie = px.pie(
-            emotion_counts,
-            names="Emotion",
-            values="Count",
-            title="Emotion Distribution in Dataset",
-            hole=0.4
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
+        # Quadrant labels
+        fig_va.add_annotation(x=0.95, y=0.95, text="Passionate", showarrow=False,
+                             font=dict(color="#888", size=11), xref="paper", yref="paper")
+        fig_va.add_annotation(x=0.95, y=0.03, text="Agitated", showarrow=False,
+                             font=dict(color="#888", size=11), xref="paper", yref="paper")
+        fig_va.add_annotation(x=0.03, y=0.95, text="Tender/Calm", showarrow=False,
+                             font=dict(color="#888", size=11), xref="paper", yref="paper")
+        fig_va.add_annotation(x=0.03, y=0.03, text="Melancholic", showarrow=False,
+                             font=dict(color="#888", size=11), xref="paper", yref="paper")
 
-        # -- Emotion by Composer --
-        st.subheader("🎼 Emotion per Composer")
+        fig_va.update_layout(height=520)
+        st.plotly_chart(fig_va, use_container_width=True)
 
-        composer_emotion = (
-            df.groupby([composer_col, emotion_col])
-            .size()
-            .reset_index(name="Count")
-        )
+        # ---- Emotion Distribution ----
+        col1, col2 = st.columns(2)
 
-        fig_heat = px.density_heatmap(
-            composer_emotion,
-            x=composer_col,
-            y=emotion_col,
-            z="Count",
-            title="Emotion Distribution by Composer",
-            labels={emotion_col: "Emotion"}
-        )
-        fig_heat.update_layout(height=450)
-        st.plotly_chart(fig_heat, use_container_width=True)
+        with col1:
+            st.subheader("Emotion Label Distribution")
+            if has_label:
+                emo_counts = df["emotion_label"].value_counts().reset_index()
+                emo_counts.columns = ["Emotion", "Count"]
+                fig_pie = px.pie(emo_counts, names="Emotion", values="Count",
+                                title="Emotion Quadrants", hole=0.4)
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+            # VA score metrics
+            col_v, col_a = st.columns(2)
+            col_v.metric("Mean Valence", f"{df['valence_score'].mean():.3f}")
+            col_a.metric("Mean Arousal", f"{df['arousal_score'].mean():.3f}")
+
+        with col2:
+            st.subheader("VA by Composer")
+            comp_va = df.groupby(composer_col)[["valence_score", "arousal_score"]].mean()
+            comp_va = comp_va[comp_va.index.isin(
+                df[composer_col].value_counts().head(15).index
+            )]
+            fig_comp_va = px.scatter(
+                comp_va.reset_index(),
+                x="valence_score", y="arousal_score",
+                text=composer_col,
+                title="Composer Average VA Position (Top 15)",
+                labels={"valence_score": "Valence", "arousal_score": "Arousal"},
+            )
+            fig_comp_va.update_traces(textposition="top center", textfont=dict(size=9))
+            fig_comp_va.update_layout(height=420)
+            st.plotly_chart(fig_comp_va, use_container_width=True)
+
+        # ---- Features by Emotion Quadrant ----
+        st.subheader("🎹 Musical Features by Emotion Quadrant")
+
+        if has_label:
+            col_left, col_right = st.columns(2)
+            with col_left:
+                fig_box1 = px.box(df, x="emotion_label", y="pitch_range",
+                                 color="emotion_label",
+                                 title="Pitch Range by Emotion",
+                                 labels={"pitch_range": "Pitch Range (st)"})
+                fig_box1.update_layout(showlegend=False, height=380)
+                st.plotly_chart(fig_box1, use_container_width=True)
+            with col_right:
+                fig_box2 = px.box(df, x="emotion_label", y="note_density",
+                                 color="emotion_label",
+                                 title="Note Density by Emotion",
+                                 labels={"note_density": "Note Density (n/s)"})
+                fig_box2.update_layout(showlegend=False, height=380)
+                st.plotly_chart(fig_box2, use_container_width=True)
+
+        # ---- Legacy Emotion (if available) ----
+        legacy_col = next((c for c in df.columns if "emotion_legacy" in c.lower()), None)
+        if legacy_col and has_label:
+            with st.expander("Compare with Legacy Emotion Labels"):
+                st.caption("Old rule-based labels vs new VA-based labels")
+                cross = pd.crosstab(df[legacy_col], df["emotion_label"])
+                st.dataframe(cross, use_container_width=True)
 
     else:
-        st.info("No emotion field found in dataset.")
+        # Fallback: old emotion column
+        st.warning("VA emotion model not yet applied. Run scripts/regenerate_emotions.py to enable the new emotion dashboard.")
 
-    # -- 音乐特征按情绪分组 --
-    st.subheader("🎹 Musical Features by Emotion")
+        if emotion_col:
+            st.subheader("Emotion Distribution (Legacy)")
+            emotion_counts = (
+                df[emotion_col].dropna().astype(str).value_counts().reset_index()
+            )
+            emotion_counts.columns = ["Emotion", "Count"]
+            fig_pie = px.pie(emotion_counts, names="Emotion", values="Count",
+                            title="Emotion Distribution", hole=0.4)
+            st.plotly_chart(fig_pie, use_container_width=True)
 
-    # 选两个最重要的特征做对比
-    col_left, col_right = st.columns(2)
-
-    with col_left:
-        fig_range_emo = px.box(
-            df,
-            x=emotion_col,
-            y="pitch_range",
-            color=emotion_col,
-            title="Pitch Range by Emotion",
-            labels={"pitch_range": "Pitch Range (semitones)"}
-        )
-        fig_range_emo.update_layout(showlegend=False, height=380)
-        st.plotly_chart(fig_range_emo, use_container_width=True)
-
-    with col_right:
-        fig_dens_emo = px.box(
-            df,
-            x=emotion_col,
-            y="note_density",
-            color=emotion_col,
-            title="Note Density by Emotion",
-            labels={"note_density": "Note Density (notes/sec)"}
-        )
-        fig_dens_emo.update_layout(showlegend=False, height=380)
-        st.plotly_chart(fig_dens_emo, use_container_width=True)
-
-    # -- 情绪风格空间 --
-    st.subheader("🎵 Emotion Style Space: Range × Density")
+    # ---- 情绪风格空间 (always available, needs some emotion col) ----
+    display_col = emotion_col if emotion_col else composer_col
+    st.subheader("🎵 Style Space Colored by Emotion")
 
     fig_emo_space = px.scatter(
         df,
         x="pitch_range",
         y="note_density",
-        color=emotion_col,
+        color=display_col,
         size="tempo",
         hover_name="title",
-        title="Works Colored by Emotion — Pitch Range vs Note Density",
+        title="Works by Emotion — Pitch Range vs Note Density",
         labels={
             "pitch_range": "Pitch Range (semitones)",
             "note_density": "Note Density (notes/sec)"
@@ -1127,38 +1371,21 @@ elif nav_option == "🎭 Emotion Analysis":
     fig_emo_space.update_layout(height=480)
     st.plotly_chart(fig_emo_space, use_container_width=True)
 
-    # -- Tempo vs Melodic Complexity by Emotion --
-    st.subheader("🎼 Tempo × Melodic Complexity by Emotion")
-
-    fig_tm = px.scatter(
-        df,
-        x="tempo",
-        y="melodic_complexity",
-        color=emotion_col,
-        hover_name="title",
-        title="Tempo vs Melodic Complexity Colored by Emotion",
-        labels={
-            "tempo": "Tempo (BPM)",
-            "melodic_complexity": "Melodic Complexity"
-        },
-        opacity=0.75
-    )
-    fig_tm.update_layout(height=460)
-    st.plotly_chart(fig_tm, use_container_width=True)
-
-    # -- 相关矩阵 --
+    # ---- Correlation Matrix ----
     st.subheader("🔗 Feature Correlation Matrix")
 
-    if len(numeric_cols) >= 2:
-        corr_df = df[numeric_cols].corr()
-
+    num_cols_for_corr = (
+        df.select_dtypes(include="number")
+        .columns.tolist()
+    )
+    if len(num_cols_for_corr) >= 2:
+        corr_df = df[num_cols_for_corr].corr()
         fig_corr = px.imshow(
             corr_df,
             text_auto=".2f",
             title="Numeric Feature Correlations",
             color_continuous_scale="RdBu_r",
-            zmin=-1,
-            zmax=1
+            zmin=-1, zmax=1
         )
         fig_corr.update_layout(height=500)
         st.plotly_chart(fig_corr, use_container_width=True)
@@ -1446,7 +1673,7 @@ elif nav_option == "💬 Friends & Chat":
 
         else:
             st.subheader("👥 My Friends")
-            if friends:
+            if friends: 
                 for f in friends:
                     col1, col2 = st.columns([3, 1])
                     with col1:
@@ -1717,10 +1944,9 @@ elif nav_option == "🔐 Admin Panel":
                 "Role": "👑 Admin" if role == "admin" else "User",
                 "Registered": created
             })
-        st.dataframe(
-            user_data,
-            use_container_width=True,
-            hide_index=True
+        _interactive_table(
+            pd.DataFrame(user_data),
+            key="admin_users", page_size=20, height=400
         )
     else:
         st.info("No users registered yet.")
@@ -1738,10 +1964,9 @@ elif nav_option == "🔐 Admin Panel":
                 "Username": uname,
                 "Visits": cnt
             })
-        st.dataframe(
-            activity_data,
-            use_container_width=True,
-            hide_index=True
+        _interactive_table(
+            pd.DataFrame(activity_data),
+            key="admin_activity", page_size=20, height=400
         )
 
     st.markdown("---")
@@ -1758,10 +1983,9 @@ elif nav_option == "🔐 Admin Panel":
                 "User": uname or "(Guest)",
                 "Time": vtime
             })
-        st.dataframe(
-            log_data,
-            use_container_width=True,
-            hide_index=True
+        _interactive_table(
+            pd.DataFrame(log_data),
+            key="admin_logs", page_size=25, height=450
         )
     else:
         st.info("No visit logs yet.")

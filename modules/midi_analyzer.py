@@ -1,17 +1,27 @@
 import mido
 import numpy as np
-from modules.key_detection import detect_key
+from modules.key_detection import MAJOR_PROFILE, MINOR_PROFILE, KEY_NAMES_MAJOR, KEY_NAMES_MINOR
+from modules.harmony_analyzer import analyze_harmony
 
 
-def _parse_midi(midi_file_path):
+def _parse_midi_fast(midi_file_path):
+    """Single-pass MIDI parse: extracts notes, tempo, and pitch-class histogram.
+
+    Returns: (notes_data, total_time, tempo_bpm, pitch_class_histogram)
+    """
     mid = mido.MidiFile(midi_file_path)
     current_time = 0.0
 
     active_notes = {}  # (channel, note) -> (start_sec, velocity)
     notes_data = []
+    tempos = []  # collect set_tempo events
+    pc_hist = np.zeros(12, dtype=float)  # pitch-class histogram for key detection
 
     for msg in mid:
         current_time += msg.time
+
+        if msg.type == "set_tempo":
+            tempos.append(msg.tempo)
 
         if msg.type in ("note_on", "note_off") and msg.channel != 9:
             key = (msg.channel, msg.note)
@@ -31,26 +41,54 @@ def _parse_midi(midi_file_path):
                             "duration": round(duration, 3),
                             "velocity": velocity
                         })
+                        # accumulate pitch-class histogram (duration-weighted)
+                        pc = msg.note % 12
+                        weight = duration * (velocity / 127.0)
+                        pc_hist[pc] += weight
 
     total_time = mid.length if mid.length else current_time
-    return notes_data, total_time
 
+    # Normalize pitch-class histogram
+    total_pc = pc_hist.sum()
+    if total_pc > 0:
+        pc_hist /= total_pc
 
-def _estimate_tempo(midi_file_path):
-    mid = mido.MidiFile(midi_file_path)
-    tempos = []
-    for msg in mid:
-        if msg.type == "set_tempo":
-            tempos.append(msg.tempo)
+    # Compute tempo
     if tempos:
         avg_mspb = sum(tempos) / len(tempos)
-        return round(60_000_000 / avg_mspb, 2)
-    return 120  # default
+        tempo = round(60_000_000 / avg_mspb, 2)
+    else:
+        tempo = 120.0
+
+    return notes_data, total_time, tempo, pc_hist
 
 
-def analyze_midi(midi_file_path):
+def _detect_key_fast(pc_hist):
+    """Key detection from pre-computed pitch-class histogram (no MIDI re-read)."""
+    def _corr(a, b):
+        if np.std(a) == 0 or np.std(b) == 0:
+            return 0.0
+        return float(np.corrcoef(a, b)[0, 1])
+
+    major_scores = np.array([_corr(pc_hist, np.roll(MAJOR_PROFILE, i)) for i in range(12)])
+    minor_scores = np.array([_corr(pc_hist, np.roll(MINOR_PROFILE, i)) for i in range(12)])
+
+    best_major = int(np.argmax(major_scores))
+    best_minor = int(np.argmax(minor_scores))
+
+    if major_scores[best_major] > minor_scores[best_minor]:
+        key = KEY_NAMES_MAJOR[best_major]
+        confidence = float(major_scores[best_major])
+    else:
+        key = KEY_NAMES_MINOR[best_minor]
+        confidence = float(minor_scores[best_minor])
+
+    return {"key": key, "confidence": round(confidence * 100, 2)}
+
+
+def analyze_midi(midi_file_path, skip_harmony=False):
     try:
-        notes_data, total_time = _parse_midi(midi_file_path)
+        notes_data, total_time, tempo, pc_hist = _parse_midi_fast(midi_file_path)
     except Exception as e:
         return {"error": f"MIDI Parse Error: {e}"}
 
@@ -74,11 +112,6 @@ def analyze_midi(midi_file_path):
         total_time = 1
     note_density = total_notes / total_time
 
-    try:
-        tempo = _estimate_tempo(midi_file_path)
-    except Exception:
-        tempo = 120
-
     rhythm_std = np.std(durations)
     pitch_diff = np.diff(pitches)
     melodic_complexity = float(np.mean(np.abs(pitch_diff))) if len(pitch_diff) > 0 else 0.0
@@ -86,7 +119,18 @@ def analyze_midi(midi_file_path):
     avg_polyphony = _compute_polyphony(notes_data)
     pitch_entropy = _compute_pitch_entropy(notes_data)
 
-    key_result = detect_key(midi_file_path)
+    key_result = _detect_key_fast(pc_hist)
+
+    # ---- Harmony analysis (skip in batch mode for speed) ----
+    if skip_harmony:
+        harmony = {
+            "chord_sequence": [], "chord_types": {}, "chord_diversity": 0.0,
+            "harmonic_rhythm": 0.0, "cadences": [], "cadence_counts": {},
+            "bass_motion_step_ratio": 0.0, "tonic_dominant_ratio": 0.5,
+            "chromatic_pct": 0.0, "total_chords_detected": 0,
+        }
+    else:
+        harmony = analyze_harmony(notes_data, key_result["key"])
 
     def r(v):
         return round(float(v), 2)
@@ -105,6 +149,12 @@ def analyze_midi(midi_file_path):
         "total_notes": total_notes,
         "avg_polyphony": r(avg_polyphony),
         "pitch_entropy": r(pitch_entropy),
+        # harmony summary
+        "chord_diversity": harmony["chord_diversity"],
+        "harmonic_rhythm": harmony["harmonic_rhythm"],
+        "tonic_dominant_ratio": r(harmony["tonic_dominant_ratio"]),
+        "bass_motion_step_ratio": harmony["bass_motion_step_ratio"],
+        "chromatic_pct": harmony["chromatic_pct"],
     }
 
     return {
@@ -125,6 +175,16 @@ def analyze_midi(midi_file_path):
         "key_confidence": key_result["confidence"],
         "avg_polyphony": r(avg_polyphony),
         "pitch_entropy": r(pitch_entropy),
+        # harmony features
+        "chord_types": harmony["chord_types"],
+        "chord_diversity": harmony["chord_diversity"],
+        "harmonic_rhythm": harmony["harmonic_rhythm"],
+        "cadences": harmony["cadences"],
+        "cadence_counts": harmony["cadence_counts"],
+        "bass_motion_step_ratio": harmony["bass_motion_step_ratio"],
+        "tonic_dominant_ratio": r(harmony["tonic_dominant_ratio"]),
+        "chromatic_pct": harmony["chromatic_pct"],
+        "total_chords_detected": harmony["total_chords_detected"],
     }
 
 
